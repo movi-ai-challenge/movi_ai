@@ -1315,3 +1315,438 @@ Backend 전달
 ```
 
 현재 단계에서는 **전자금융공동망 데이터 기준 Isolation Forest Baseline 학습 → 평가 → 실제 추론까지 전체 파이프라인 구현을 완료**하였다. 다음 단계에서는 사용자별 과거 거래 이력을 반영하는 행동 기반 Feature를 추가해 Baseline 대비 탐지 성능을 비교·고도화할 예정이다.
+
+# 16. 1주차 - 음성 기반 요구사항 분석 개발
+
+## 개발 목표
+
+1주차에는 사용자의 음성 명령을 실시간으로 텍스트로 변환하고, 해당 명령에서 **Intent / Entity / 누락 정보**를 추출하는 AI 요구사항 분석 파이프라인을 구축하였다.
+
+현재 단계에서는 Spring Backend 및 Node.js Frontend와 통합하기 전이므로, **AI 모듈 단독으로 요구사항 분석이 가능한 수준까지 구현**하였다.
+
+### 현재 처리 흐름
+
+```text
+사용자 음성
+    ↓
+Google STT V2
+    ↓
+실시간 Transcript
+    ↓
+Wake Word "모비야" 확인
+    ↓
+GPT 기반 요구사항 분석
+    ↓
+Intent + Entity 추출
+    ↓
+Requirement Validator
+    ↓
+누락 정보 확인
+    ↓
+Follow-up 질문
+    ↓
+추가 답변 분석 및 Context 병합
+    ↓
+Requirement Complete
+```
+
+---
+
+## 프로젝트 구조
+
+```text
+src/
+└── voice_analysis/
+    ├── __init__.py
+    ├── config.py
+    ├── stt_stream_service.py
+    ├── wake_word_detector.py
+    ├── schemas.py
+    ├── requirement_analyzer.py
+    ├── requirement_validator.py
+    ├── conversation_context.py
+    ├── follow_up_entity_parser.py
+    └── voice_pipeline.py
+```
+
+---
+
+## ① `stt_stream_service.py`
+
+### 역할
+
+Google Cloud Speech-to-Text V2를 이용하여 **실시간 음성을 텍스트로 변환**한다.
+
+```text
+Microphone
+    ↓
+PCM Audio Chunk
+    ↓
+Google StreamingRecognize
+    ↓
+Interim / Final Transcript
+```
+
+### 주요 고려사항
+
+* 파일 업로드 방식이 아닌 **Streaming STT** 사용
+* `LINEAR16 / Mono` 기반 PCM 처리
+* Interim 결과와 Final 결과 분리
+* 실제 요구사항 분석에는 Final Transcript만 사용
+* 테스트 단계에서는 Mac 마이크를 사용하고, 향후 Frontend 음성 스트림으로 교체 가능하도록 STT 로직을 독립적으로 구성
+
+---
+
+## ② `wake_word_detector.py`
+
+### 역할
+
+STT 결과에서 호출어인 **`모비야`**를 감지하고 실제 명령만 추출한다.
+
+예:
+
+```text
+모비야 김민수한테 오만원 보내줘
+```
+
+↓
+
+```text
+김민수한테 오만원 보내줘
+```
+
+### 고려사항
+
+모든 STT 결과를 GPT API에 전달하지 않고 `모비야`가 감지된 경우에만 요구사항 분석을 수행하도록 하였다.
+
+이를 통해 불필요한 API 호출을 줄이고 일반 대화가 금융 명령으로 처리되는 것을 방지한다.
+
+---
+
+## ③ `schemas.py`
+
+### 역할
+
+AI 요구사항 분석 결과의 구조를 Pydantic Schema로 정의하였다.
+
+지원 Intent:
+
+```text
+read_screen
+transfer_money
+check_history
+check_savings
+confirm
+deny
+cancel
+unknown
+```
+
+주요 Entity:
+
+```text
+recipient_name
+recipient_bank
+recipient_account
+amount
+
+source_bank
+source_account
+
+date_from
+date_to
+bank
+account
+```
+
+GPT 결과를 자유 형식 문자열이 아닌 **고정된 구조의 데이터**로 관리하기 위해 사용한다.
+
+---
+
+## ④ `requirement_analyzer.py`
+
+### 역할
+
+STT 결과를 GPT 기반으로 분석하여 다음 정보를 한 번에 추출한다.
+
+```text
+Intent
+Entity
+Missing Fields
+```
+
+예:
+
+```text
+김민수한테 국민은행으로 오만원 보내줘
+```
+
+↓
+
+```json
+{
+  "intent": "transfer_money",
+  "entities": {
+    "recipient_name": "김민수",
+    "recipient_bank": "국민은행",
+    "recipient_account": null,
+    "amount": 50000
+  },
+  "missing_fields": [
+    "recipient_account"
+  ]
+}
+```
+
+### 주요 고려사항
+
+기존의 별도 Text Normalizer와 규칙 기반 Intent/Entity 분석 대신 **GPT 기반 Structured Output**을 사용하였다.
+
+이를 통해 다음 처리를 하나의 단계에서 수행한다.
+
+```text
+오만원 → 50000
+국민 → 국민은행
+보내줘 → transfer_money
+```
+
+또한 사용자가 말하지 않은 계좌번호나 은행 등의 금융정보는 **추측하지 않고 `null`로 반환**하도록 구성하였다.
+
+---
+
+## ⑤ `requirement_validator.py`
+
+### 역할
+
+GPT가 반환한 `missing_fields`를 그대로 사용하지 않고 **코드 규칙으로 다시 검증**한다.
+
+현재 계좌이체 필수 정보:
+
+```text
+recipient_name
+recipient_bank
+recipient_account
+amount
+```
+
+### 고려사항
+
+LLM은 자연어 해석을 담당하고, 실제 요청의 실행 가능 여부는 코드에서 결정하도록 역할을 분리하였다.
+
+```text
+GPT
+→ 언어 이해
+
+Validator
+→ 실행 조건 검증
+```
+
+---
+
+## ⑥ `conversation_context.py`
+
+### 역할
+
+사용자의 최초 명령과 이후 추가 답변을 하나의 요청으로 유지한다.
+
+예:
+
+```text
+사용자:
+김민수한테 오만원 보내줘
+
+↓
+
+recipient_name = 김민수
+amount = 50000
+recipient_bank = null
+recipient_account = null
+```
+
+↓
+
+```text
+시스템:
+받는 분의 은행을 말씀해주세요.
+
+사용자:
+국민은행
+```
+
+↓
+
+```text
+recipient_bank = 국민은행
+```
+
+이후 남아 있는 누락 필드를 다시 확인한다.
+
+---
+
+## ⑦ `follow_up_entity_parser.py`
+
+### 역할
+
+누락 정보에 대한 사용자의 추가 음성을 현재 필요한 Entity에 맞게 분석한다.
+
+예:
+
+```text
+필요한 Entity:
+recipient_bank
+
+사용자:
+국민은행으로 해줘
+```
+
+↓
+
+```json
+{
+  "field_name": "recipient_bank",
+  "value": "국민은행",
+  "success": true
+}
+```
+
+계좌번호, 금액, 은행명 등 추가 응답 역시 GPT를 통해 구조화한다.
+
+---
+
+## ⑧ `voice_pipeline.py`
+
+### 역할
+
+앞서 구현한 모듈들을 하나의 요구사항 분석 Pipeline으로 통합한다.
+
+```text
+Wake Word
+    ↓
+Requirement Analyzer
+    ↓
+Validator
+    ↓
+Conversation Context
+    ↓
+Follow-up Parser
+```
+
+외부에서는 내부 구현과 관계없이 다음과 같은 상태값을 사용할 수 있도록 구성하였다.
+
+```text
+ignored
+awaiting_command
+need_more_info
+ready
+unsupported
+error
+```
+
+예:
+
+```json
+{
+  "status": "need_more_info",
+  "intent": "transfer_money",
+  "missing_fields": [
+    "recipient_account"
+  ],
+  "next_question": "받는 분의 계좌번호를 말씀해주세요."
+}
+```
+
+모든 요구사항이 확보되면:
+
+```json
+{
+  "status": "ready",
+  "intent": "transfer_money",
+  "missing_fields": []
+}
+```
+
+상태를 반환한다.
+
+---
+
+# 17. 현재 지원 기능
+
+| 기능       | Intent           | 예시                  |
+| -------- | ---------------- | ------------------- |
+| 화면 읽기    | `read_screen`    | `모비야 화면 읽어줘`        |
+| 계좌 이체    | `transfer_money` | `모비야 김민수한테 오만원 보내줘` |
+| 거래내역 조회  | `check_history`  | `모비야 어제 거래내역 알려줘`   |
+| 가입 적금 조회 | `check_savings`  | `모비야 가입한 적금 알려줘`    |
+| 확인       | `confirm`        | `응`, `진행해줘`         |
+| 거절       | `deny`           | `아니야`               |
+| 취소       | `cancel`         | `취소해줘`              |
+
+---
+
+# 18. 개발 과정에서 고려한 부분
+
+### 1. AI와 서비스 로직 분리
+
+GPT는 자연어 분석만 담당하고, 필수 정보 검증과 상태 관리는 Python 코드에서 수행하도록 분리하였다.
+
+### 2. 금융정보 Hallucination 방지
+
+사용자가 직접 제공하지 않은 은행, 계좌번호, 수취인 등의 정보는 임의로 생성하지 않도록 Structured Output과 Validator를 함께 사용하였다.
+
+### 3. API 비용 최소화
+
+`모비야`가 감지된 명령만 GPT에 전달하고, 요구사항 분석에는 경량 모델을 사용하도록 설계하였다.
+
+### 4. Multi-turn 요구사항 지원
+
+한 문장에서 모든 정보를 요구하지 않고, 누락된 정보만 순차적으로 질문하고 기존 Context에 병합할 수 있도록 구성하였다.
+
+### 5. Backend / Frontend 독립성
+
+현재 AI 모듈은 Spring 또는 Node.js 코드에 직접 의존하지 않는다.
+
+향후 통합 시:
+
+```text
+Node.js
+→ 실시간 음성 전달
+
+Python AI
+→ 요구사항 JSON 반환
+
+Spring
+→ 실제 금융 데이터 조회 및 거래 처리
+```
+
+형태로 연결할 수 있도록 각 계층의 책임을 분리하였다.
+
+---
+
+# 19. 1주차 완료 범위
+
+```text
+실시간 음성 처리
+
+✅ Google Cloud STT V2 설정
+✅ Streaming STT
+✅ 실시간 마이크 테스트
+✅ Interim / Final Transcript 분리
+```
+
+```text
+요구사항 분석
+
+✅ Wake Word 감지
+✅ GPT 기반 Intent 분석
+✅ Entity 추출
+✅ 금액 표현 구조화
+✅ 누락 정보 판단
+✅ Validator
+✅ Multi-turn Context
+✅ Follow-up Entity 분석
+✅ Voice Pipeline 통합
+```
+
+현재 단계에서는 **실시간 음성 → 요구사항 분석 → 누락정보 보완 → 실행 가능한 Requirement 생성까지 AI 파트 독립 Pipeline 구현을 완료**하였다.
+
+Spring Backend 및 Node.js Frontend 통합 이후에는 실제 계좌 데이터 조회, 출금계좌 선택, 사용자 음성 재확인 및 Fraud Detection 파이프라인과 연결할 예정이다.
