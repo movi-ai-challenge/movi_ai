@@ -33,12 +33,12 @@ try:
     )
 
     from .data_loader import (
-        iter_dataset_chunks,
+        load_dataset,
     )
 
     from .feature_engineering import (
         get_feature_config,
-        transform_features,
+        engineer_features,
     )
 
     from .train_iforest import (
@@ -54,12 +54,12 @@ except ImportError:
     )
 
     from data_loader import (
-        iter_dataset_chunks,
+        load_dataset,
     )
 
     from feature_engineering import (
         get_feature_config,
-        transform_features,
+        engineer_features,
     )
 
     from train_iforest import (
@@ -107,7 +107,7 @@ def get_evaluation_columns(
     """
     Validation CSV에서 평가에 필요한 컬럼만 읽는다.
 
-    Feature Engineering용 컬럼
+    Feature Engineering용 원본 컬럼
     +
     이상거래여부
     """
@@ -147,8 +147,15 @@ def extract_target(
     target_column: str,
 ) -> np.ndarray:
     """
-    이상거래여부를 0/1 numpy 배열로 변환한다.
+    이상거래여부를 0 / 1 numpy 배열로 변환한다.
     """
+
+    if target_column not in df.columns:
+
+        raise ValueError(
+            f"Validation Target 컬럼이 없습니다: "
+            f"{target_column}"
+        )
 
     target = pd.to_numeric(
         df[target_column],
@@ -189,14 +196,49 @@ def extract_target(
 def collect_validation_scores(
     dataset_type: str,
     *,
-    chunksize: int = 100_000,
-) -> tuple[np.ndarray, np.ndarray]:
+    max_files: int | None = None,
+    nrows_per_file: int | None = None,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    pd.DataFrame,
+]:
     """
-    Validation 전체를 Chunk 단위로 읽으면서
+    Validation 데이터를 전체 시간순으로 불러온 뒤
+    Historical Feature를 한 번에 생성한다.
 
-    1. Train Preprocessor로 Feature 변환
-    2. Isolation Forest Score 계산
-    3. Label 수집
+    중요
+    ----------------------------------------------------------
+
+    Historical Feature:
+
+        amount_ratio
+        amount_zscore
+        new_recipient
+        unusual_medium
+        historical_transaction_count
+        same_day_transaction_count
+        same_time_bucket_count
+
+    는 거래 History가 필요하다.
+
+    따라서 Chunk마다 독립적으로 Feature Engineering을 하면
+    Chunk 경계에서 History가 끊어지므로 정확한 평가가 아니다.
+
+
+    Flow
+    ----------------------------------------------------------
+
+    Validation 전체 Load
+        ↓
+    시간순 정렬
+        ↓
+    Historical Feature Engineering
+        ↓
+    Train Preprocessor Transform
+        ↓
+    Isolation Forest Score
+
 
     Returns
     -------
@@ -205,6 +247,9 @@ def collect_validation_scores(
 
     anomaly_scores
         높을수록 이상거래에 가까운 Score
+
+    engineered_df
+        분석용 Feature DataFrame
     """
 
     dataset_config = (
@@ -217,8 +262,9 @@ def collect_validation_scores(
         "target"
     ]
 
+
     # ========================================================
-    # 학습 완료 Model Bundle Load
+    # Model Bundle
     # ========================================================
 
     bundle = load_model_bundle(
@@ -234,8 +280,10 @@ def collect_validation_scores(
     ]
 
 
-    # Model / 요청 Dataset 일치 여부
-    if bundle["dataset_type"] != dataset_type:
+    if (
+        bundle["dataset_type"]
+        != dataset_type
+    ):
 
         raise ValueError(
             "Model의 dataset_type과 "
@@ -248,156 +296,192 @@ def collect_validation_scores(
     )
 
 
-    all_targets = []
-    all_scores = []
-
-    total_rows = 0
-    chunk_count = 0
-
-
     print()
     print("=" * 70)
     print("VALIDATION SCORING")
     print("=" * 70)
 
     print(
-        f"Dataset    : {dataset_type}"
+        f"Dataset : {dataset_type}"
     )
 
-    print(
-        f"Chunk Size : {chunksize:,}"
-    )
+    if max_files is not None:
+        print(
+            f"Max Files : {max_files}"
+        )
+
+    if nrows_per_file is not None:
+        print(
+            f"Rows / File : {nrows_per_file:,}"
+        )
 
     print("=" * 70)
 
 
     # ========================================================
-    # Validation Chunk 순회
+    # STEP 1
+    # Validation 전체 Load
+    #
+    # load_dataset 내부에서 시간순 정렬 수행
     # ========================================================
 
-    for chunk in iter_dataset_chunks(
-        dataset_type=dataset_type,
-        split="validation",
-        chunksize=chunksize,
-        usecols=usecols,
-    ):
-
-        chunk_count += 1
-
-        # ====================================================
-        # Target
-        # ====================================================
-
-        y_chunk = extract_target(
-            chunk,
-            target_column,
-        )
-
-
-        # ====================================================
-        # Feature Transform
-        #
-        # 주의:
-        # Validation에서는 fit_transform 금지
-        # Train에서 Fit된 Preprocessor만 사용
-        # ====================================================
-
-        X_chunk = transform_features(
-            chunk,
-            dataset_type,
-            preprocessor,
-        )
-
-
-        # ====================================================
-        # score_samples에는 CSR 형태 사용
-        # ====================================================
-
-        if sparse.issparse(
-            X_chunk
-        ):
-
-            X_chunk = (
-                X_chunk
-                .tocsr()
-                .astype(
-                    np.float32
-                )
-            )
-
-        else:
-
-            X_chunk = np.asarray(
-                X_chunk,
-                dtype=np.float32,
-            )
-
-
-        # ====================================================
-        # Isolation Forest Score
-        #
-        # sklearn:
-        # 낮을수록 이상
-        #
-        # MOVI:
-        # 높을수록 위험
-        #
-        # 따라서 부호 반전
-        # ====================================================
-
-        raw_scores = model.score_samples(
-            X_chunk
-        )
-
-        anomaly_scores = (
-            -raw_scores
-        )
-
-
-        all_targets.append(
-            y_chunk
-        )
-
-        all_scores.append(
-            anomaly_scores
-        )
-
-
-        total_rows += len(
-            chunk
-        )
-
-
-        print(
-            f"[Chunk {chunk_count:>3}] "
-            f"누적 평가 거래="
-            f"{total_rows:>10,}"
-        )
-
-
-    # ========================================================
-    # 하나의 배열로 합치기
-    # ========================================================
-
-    if not all_targets:
-
-        raise RuntimeError(
-            "Validation 데이터가 없습니다."
-        )
-
-
-    y_true = np.concatenate(
-        all_targets
+    print()
+    print(
+        "[1/4] Validation 전체 Load"
     )
 
-    anomaly_scores = np.concatenate(
-        all_scores
+
+    validation_df = load_dataset(
+
+        dataset_type=dataset_type,
+
+        split="validation",
+
+        usecols=usecols,
+
+        max_files=max_files,
+
+        nrows_per_file=nrows_per_file,
+    )
+
+
+    print()
+    print(
+        f"Validation Rows : "
+        f"{len(validation_df):,}"
+    )
+
+
+    # ========================================================
+    # STEP 2
+    # Target 추출
+    # ========================================================
+
+    print()
+    print(
+        "[2/4] Target 추출"
+    )
+
+
+    y_true = extract_target(
+        validation_df,
+        target_column,
+    )
+
+
+    print(
+        f"Normal : "
+        f"{np.sum(y_true == 0):,}"
+    )
+
+    print(
+        f"Fraud  : "
+        f"{np.sum(y_true == 1):,}"
+    )
+
+
+    # ========================================================
+    # STEP 3
+    # Historical Feature Engineering
+    # ========================================================
+
+    print()
+    print(
+        "[3/4] Historical Feature Engineering"
+    )
+
+
+    engineered_df = engineer_features(
+        validation_df,
+        dataset_type,
+    )
+
+
+    print(
+        f"Engineered Rows    : "
+        f"{len(engineered_df):,}"
+    )
+
+    print(
+        f"Engineered Columns : "
+        f"{len(engineered_df.columns):,}"
+    )
+
+
+    # ========================================================
+    # STEP 4
+    # Train Preprocessor Transform
+    # ========================================================
+
+    print()
+    print(
+        "[4/4] Preprocessor + Isolation Forest"
+    )
+
+
+    X_validation = (
+        preprocessor
+        .transform(
+            engineered_df
+        )
+    )
+
+
+    X_validation = (
+        X_validation
+        .astype(
+            np.float32
+        )
+    )
+
+
+    if sparse.issparse(
+        X_validation
+    ):
+
+        X_validation = (
+            X_validation
+            .tocsr()
+            .astype(
+                np.float32
+            )
+        )
+
+    else:
+
+        X_validation = np.asarray(
+            X_validation,
+            dtype=np.float32,
+        )
+
+
+    # ========================================================
+    # Isolation Forest Score
+    #
+    # score_samples:
+    # 낮을수록 이상
+    #
+    # MOVI anomaly_score:
+    # 높을수록 위험
+    # ========================================================
+
+    raw_scores = (
+        model
+        .score_samples(
+            X_validation
+        )
+    )
+
+
+    anomaly_scores = (
+        -raw_scores
     )
 
 
     print()
     print("=" * 70)
     print("Validation Scoring 완료")
+    print("=" * 70)
 
     print(
         f"Total Rows : "
@@ -420,11 +504,136 @@ def collect_validation_scores(
     return (
         y_true,
         anomaly_scores,
+        engineered_df,
     )
 
 
 # ============================================================
-# 5. Threshold 탐색
+# 5. Score 분포 분석
+# ============================================================
+
+def calculate_score_distribution(
+    y_true: np.ndarray,
+    anomaly_scores: np.ndarray,
+) -> dict:
+    """
+    정상 / 이상거래 각각의 Score 분포를 계산한다.
+
+    Dummy Test에서 Score 차이가 작아 보였기 때문에
+    실제 Validation 분포에서 Score의 상대적 위치를
+    확인하기 위한 함수.
+    """
+
+    normal_scores = (
+        anomaly_scores[
+            y_true == 0
+        ]
+    )
+
+    fraud_scores = (
+        anomaly_scores[
+            y_true == 1
+        ]
+    )
+
+
+    def summarize(
+        scores: np.ndarray,
+    ) -> dict:
+
+        if len(scores) == 0:
+
+            return {
+                "count": 0,
+            }
+
+        return {
+
+            "count": int(
+                len(scores)
+            ),
+
+            "min": float(
+                np.min(scores)
+            ),
+
+            "q01": float(
+                np.quantile(
+                    scores,
+                    0.01,
+                )
+            ),
+
+            "q05": float(
+                np.quantile(
+                    scores,
+                    0.05,
+                )
+            ),
+
+            "q25": float(
+                np.quantile(
+                    scores,
+                    0.25,
+                )
+            ),
+
+            "median": float(
+                np.quantile(
+                    scores,
+                    0.50,
+                )
+            ),
+
+            "q75": float(
+                np.quantile(
+                    scores,
+                    0.75,
+                )
+            ),
+
+            "q95": float(
+                np.quantile(
+                    scores,
+                    0.95,
+                )
+            ),
+
+            "q99": float(
+                np.quantile(
+                    scores,
+                    0.99,
+                )
+            ),
+
+            "max": float(
+                np.max(scores)
+            ),
+
+            "mean": float(
+                np.mean(scores)
+            ),
+
+            "std": float(
+                np.std(scores)
+            ),
+        }
+
+
+    return {
+
+        "normal": summarize(
+            normal_scores
+        ),
+
+        "fraud": summarize(
+            fraud_scores
+        ),
+    }
+
+
+# ============================================================
+# 6. Threshold 탐색
 # ============================================================
 
 def find_best_f1_threshold(
@@ -432,19 +641,13 @@ def find_best_f1_threshold(
     anomaly_scores: np.ndarray,
 ) -> dict:
     """
-    Precision-Recall Curve를 이용하여
-    F1 Score가 가장 높은 Threshold를 찾는다.
+    Precision-Recall Curve 기반으로
+    F1 Score가 가장 높은 Threshold 선택.
 
-    Prediction:
-
-        anomaly_score >= threshold
-            → 이상거래 1
-
-        anomaly_score < threshold
-            → 정상거래 0
+    anomaly_score >= threshold
+        → Fraud
     """
 
-    # Validation에 두 Class 모두 있어야 평가 가능
     unique_classes = np.unique(
         y_true
     )
@@ -465,8 +668,13 @@ def find_best_f1_threshold(
     )
 
 
-    # precision, recall은 thresholds보다
-    # 원소가 하나 더 많음
+    if len(thresholds) == 0:
+
+        raise RuntimeError(
+            "Threshold 후보를 생성할 수 없습니다."
+        )
+
+
     precision_for_thresholds = (
         precision[:-1]
     )
@@ -483,6 +691,7 @@ def find_best_f1_threshold(
 
 
     f1_scores = np.divide(
+
         2
         * precision_for_thresholds
         * recall_for_thresholds,
@@ -493,7 +702,9 @@ def find_best_f1_threshold(
             denominator
         ),
 
-        where=denominator != 0,
+        where=(
+            denominator != 0
+        ),
     )
 
 
@@ -504,17 +715,12 @@ def find_best_f1_threshold(
     )
 
 
-    best_threshold = float(
-        thresholds[
-            best_index
-        ]
-    )
+    return {
 
-
-    result = {
-
-        "threshold": (
-            best_threshold
+        "threshold": float(
+            thresholds[
+                best_index
+            ]
         ),
 
         "precision": float(
@@ -537,20 +743,170 @@ def find_best_f1_threshold(
     }
 
 
-    return result
+# ============================================================
+# 7. Threshold 후보 비교
+# ============================================================
+
+def compare_threshold_candidates(
+    y_true: np.ndarray,
+    anomaly_scores: np.ndarray,
+    best_threshold: float,
+) -> list[dict]:
+    """
+    Best F1 Threshold 주변과 Score Quantile 기반 후보를 비교한다.
+
+    FDS에서는 반드시 F1 하나만 보고 Threshold를
+    결정할 필요는 없다.
+
+    Recall 우선 정책 등으로 변경할 수 있도록
+    여러 후보를 출력한다.
+    """
+
+    normal_scores = (
+        anomaly_scores[
+            y_true == 0
+        ]
+    )
+
+
+    candidates = [
+
+        best_threshold,
+
+        float(
+            np.quantile(
+                anomaly_scores,
+                0.90,
+            )
+        ),
+
+        float(
+            np.quantile(
+                anomaly_scores,
+                0.95,
+            )
+        ),
+
+        float(
+            np.quantile(
+                anomaly_scores,
+                0.99,
+            )
+        ),
+
+        float(
+            np.quantile(
+                normal_scores,
+                0.95,
+            )
+        ),
+
+        float(
+            np.quantile(
+                normal_scores,
+                0.99,
+            )
+        ),
+    ]
+
+
+    # 중복 제거
+    candidates = sorted(
+        set(
+            candidates
+        )
+    )
+
+
+    results = []
+
+
+    for threshold in candidates:
+
+        y_pred = (
+            anomaly_scores
+            >= threshold
+        ).astype(
+            np.int8
+        )
+
+
+        precision = (
+            precision_score(
+                y_true,
+                y_pred,
+                zero_division=0,
+            )
+        )
+
+        recall = (
+            recall_score(
+                y_true,
+                y_pred,
+                zero_division=0,
+            )
+        )
+
+        f1 = (
+            f1_score(
+                y_true,
+                y_pred,
+                zero_division=0,
+            )
+        )
+
+
+        matrix = confusion_matrix(
+            y_true,
+            y_pred,
+            labels=[
+                0,
+                1,
+            ],
+        )
+
+
+        tn, fp, fn, tp = (
+            matrix.ravel()
+        )
+
+
+        results.append({
+
+            "threshold": float(
+                threshold
+            ),
+
+            "precision": float(
+                precision
+            ),
+
+            "recall": float(
+                recall
+            ),
+
+            "f1": float(
+                f1
+            ),
+
+            "tn": int(tn),
+            "fp": int(fp),
+            "fn": int(fn),
+            "tp": int(tp),
+        })
+
+
+    return results
 
 
 # ============================================================
-# 6. Threshold 기반 Prediction
+# 8. Threshold 기반 Prediction
 # ============================================================
 
 def predict_with_threshold(
     anomaly_scores: np.ndarray,
     threshold: float,
 ) -> np.ndarray:
-    """
-    위험점수가 Threshold 이상이면 Fraud로 판정.
-    """
 
     return (
         anomaly_scores
@@ -561,7 +917,7 @@ def predict_with_threshold(
 
 
 # ============================================================
-# 7. 최종 평가 Metric 계산
+# 9. 최종 평가 Metric
 # ============================================================
 
 def calculate_metrics(
@@ -569,9 +925,6 @@ def calculate_metrics(
     anomaly_scores: np.ndarray,
     threshold: float,
 ) -> dict:
-    """
-    선택된 Threshold 기준 최종 평가 Metric 계산.
-    """
 
     y_pred = predict_with_threshold(
         anomaly_scores,
@@ -579,14 +932,13 @@ def calculate_metrics(
     )
 
 
-    # ========================================================
-    # Confusion Matrix
-    # ========================================================
-
     matrix = confusion_matrix(
         y_true,
         y_pred,
-        labels=[0, 1],
+        labels=[
+            0,
+            1,
+        ],
     )
 
 
@@ -594,10 +946,6 @@ def calculate_metrics(
         matrix.ravel()
     )
 
-
-    # ========================================================
-    # 기본 Metric
-    # ========================================================
 
     accuracy = accuracy_score(
         y_true,
@@ -624,7 +972,7 @@ def calculate_metrics(
 
 
     # ========================================================
-    # Threshold와 무관한 Ranking Metric
+    # Ranking Metrics
     # ========================================================
 
     average_precision = (
@@ -634,15 +982,12 @@ def calculate_metrics(
         )
     )
 
+
     roc_auc = roc_auc_score(
         y_true,
         anomaly_scores,
     )
 
-
-    # ========================================================
-    # PR Curve AUC
-    # ========================================================
 
     pr_precision, pr_recall, _ = (
         precision_recall_curve(
@@ -651,17 +996,12 @@ def calculate_metrics(
         )
     )
 
-    # recall이 큰 값 → 작은 값 순으로 반환되므로
-    # AUC 계산을 위해 역순으로 정렬
+
     pr_auc = auc(
         pr_recall[::-1],
         pr_precision[::-1],
     )
 
-
-    # ========================================================
-    # 추가 FDS 지표
-    # ========================================================
 
     false_positive_rate = (
         fp / (fp + tn)
@@ -669,11 +1009,13 @@ def calculate_metrics(
         else 0.0
     )
 
+
     false_negative_rate = (
         fn / (fn + tp)
         if (fn + tp) > 0
         else 0.0
     )
+
 
     fraud_rate = float(
         np.mean(
@@ -682,7 +1024,15 @@ def calculate_metrics(
     )
 
 
-    metrics = {
+    score_distribution = (
+        calculate_score_distribution(
+            y_true,
+            anomaly_scores,
+        )
+    )
+
+
+    return {
 
         "threshold": float(
             threshold
@@ -724,7 +1074,7 @@ def calculate_metrics(
             false_negative_rate
         ),
 
-        "fraud_rate": (
+        "fraud_rate": float(
             fraud_rate
         ),
 
@@ -797,28 +1147,26 @@ def calculate_metrics(
                 )
             ),
         },
+
+        "score_distribution":
+            score_distribution,
     }
 
 
-    return metrics
-
-
 # ============================================================
-# 8. JSON 저장 Helper
+# 10. JSON 저장 Helper
 # ============================================================
 
 def save_json(
     data: dict,
     file_path,
 ) -> None:
-    """
-    Dictionary를 JSON 파일로 저장한다.
-    """
 
     file_path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
+
 
     with open(
         file_path,
@@ -835,7 +1183,7 @@ def save_json(
 
 
 # ============================================================
-# 9. Threshold 저장
+# 11. Threshold 저장
 # ============================================================
 
 def save_threshold(
@@ -843,10 +1191,6 @@ def save_threshold(
     threshold_result: dict,
     validation_size: int,
 ) -> dict:
-    """
-    inference.py에서 사용할
-    Threshold 설정 파일 저장.
-    """
 
     config = get_dataset_config(
         dataset_type
@@ -855,48 +1199,37 @@ def save_threshold(
 
     threshold_data = {
 
-        "dataset_type": (
-            dataset_type
-        ),
+        "dataset_type":
+            dataset_type,
 
-        # 점수 정의를 명시적으로 저장
-        "score_definition": (
-            "anomaly_score = "
-            "-model.score_samples(X)"
-        ),
+        "score_definition":
+            "anomaly_score = -model.score_samples(X)",
 
-        "rule": (
-            "fraud if "
-            "anomaly_score >= threshold"
-        ),
+        "rule":
+            "fraud if anomaly_score >= threshold",
 
-        "selection_method": (
-            "max_f1_on_validation"
-        ),
+        "selection_method":
+            "max_f1_on_validation",
 
-        "threshold": (
+        "threshold":
             threshold_result[
                 "threshold"
-            ]
-        ),
+            ],
 
-        "precision_at_threshold": (
+        "precision_at_threshold":
             threshold_result[
                 "precision"
-            ]
-        ),
+            ],
 
-        "recall_at_threshold": (
+        "recall_at_threshold":
             threshold_result[
                 "recall"
-            ]
-        ),
+            ],
 
-        "f1_at_threshold": (
+        "f1_at_threshold":
             threshold_result[
                 "f1"
-            ]
-        ),
+            ],
 
         "validation_size": int(
             validation_size
@@ -922,16 +1255,14 @@ def save_threshold(
 
 
 # ============================================================
-# 10. Metrics 저장
+# 12. Metrics 저장
 # ============================================================
 
 def save_metrics(
     dataset_type: str,
     metrics: dict,
+    threshold_candidates: list[dict],
 ) -> None:
-    """
-    평가 결과를 reports 폴더에 저장.
-    """
 
     config = get_dataset_config(
         dataset_type
@@ -940,15 +1271,17 @@ def save_metrics(
 
     report = {
 
-        "dataset_type": (
-            dataset_type
-        ),
+        "dataset_type":
+            dataset_type,
 
         "evaluated_at": (
             datetime.now()
             .astimezone()
             .isoformat()
         ),
+
+        "threshold_candidates":
+            threshold_candidates,
 
         **metrics,
     }
@@ -963,16 +1296,106 @@ def save_metrics(
 
 
 # ============================================================
-# 11. 평가 결과 출력
+# 13. Score 분포 출력
+# ============================================================
+
+def print_score_distribution(
+    distribution: dict,
+) -> None:
+
+    print()
+    print("[Score Distribution]")
+
+    print()
+    print(
+        f"{'Statistic':<12}"
+        f"{'Normal':>14}"
+        f"{'Fraud':>14}"
+    )
+
+    print(
+        "-" * 40
+    )
+
+
+    keys = [
+        "mean",
+        "std",
+        "min",
+        "q01",
+        "q05",
+        "q25",
+        "median",
+        "q75",
+        "q95",
+        "q99",
+        "max",
+    ]
+
+
+    normal = distribution[
+        "normal"
+    ]
+
+    fraud = distribution[
+        "fraud"
+    ]
+
+
+    for key in keys:
+
+        print(
+            f"{key:<12}"
+            f"{normal[key]:>14.6f}"
+            f"{fraud[key]:>14.6f}"
+        )
+
+
+# ============================================================
+# 14. Threshold 후보 출력
+# ============================================================
+
+def print_threshold_candidates(
+    candidates: list[dict],
+) -> None:
+
+    print()
+    print("[Threshold Candidates]")
+
+    print(
+        f"{'Threshold':>12} "
+        f"{'Precision':>10} "
+        f"{'Recall':>10} "
+        f"{'F1':>10} "
+        f"{'FP':>10} "
+        f"{'FN':>10}"
+    )
+
+    print(
+        "-" * 70
+    )
+
+
+    for result in candidates:
+
+        print(
+            f"{result['threshold']:>12.6f} "
+            f"{result['precision']:>10.4f} "
+            f"{result['recall']:>10.4f} "
+            f"{result['f1']:>10.4f} "
+            f"{result['fp']:>10,} "
+            f"{result['fn']:>10,}"
+        )
+
+
+# ============================================================
+# 15. 평가 결과 출력
 # ============================================================
 
 def print_evaluation_summary(
     dataset_type: str,
     metrics: dict,
 ) -> None:
-    """
-    주요 평가 결과 Console 출력.
-    """
 
     cm = metrics[
         "confusion_matrix"
@@ -991,6 +1414,7 @@ def print_evaluation_summary(
     print("=" * 70)
     print("EVALUATION RESULT")
     print("=" * 70)
+
 
     print(
         f"Dataset          : "
@@ -1078,7 +1502,10 @@ def print_evaluation_summary(
     print("[Confusion Matrix]")
 
     print()
-    print("                 Pred Normal   Pred Fraud")
+    print(
+        "                 "
+        "Pred Normal   Pred Fraud"
+    )
 
     print(
         f"Actual Normal    "
@@ -1117,36 +1544,46 @@ def print_evaluation_summary(
     )
 
 
+    print_score_distribution(
+        metrics[
+            "score_distribution"
+        ]
+    )
+
+
     print("=" * 70)
 
 
 # ============================================================
-# 12. 전체 Evaluation Pipeline
+# 16. 전체 Evaluation Pipeline
 # ============================================================
 
 def evaluate_model(
     dataset_type: str,
     *,
-    chunksize: int = 100_000,
+    max_files: int | None = None,
+    nrows_per_file: int | None = None,
 ) -> dict:
     """
-    전체 평가 Pipeline.
+    Evaluation Pipeline.
 
     Validation
+        ↓
+    시간순 정렬
+        ↓
+    Historical Feature Engineering
         ↓
     Train Preprocessor
         ↓
     Isolation Forest
         ↓
-    Anomaly Score
+    anomaly_score
         ↓
-    Best F1 Threshold
+    실제 Label 비교
         ↓
-    Precision / Recall / F1
+    Threshold 탐색
         ↓
-    threshold.json
-        +
-    metrics.json
+    Metrics
     """
 
     create_output_directories()
@@ -1154,42 +1591,75 @@ def evaluate_model(
 
     print()
     print("#" * 70)
+
     print(
         f"Isolation Forest Evaluation : "
         f"{dataset_type}"
     )
+
     print("#" * 70)
 
 
     # ========================================================
     # STEP 1
-    # Validation Score 계산
+    # Validation Score
     # ========================================================
 
     print()
     print(
-        "[STEP 1/4] "
+        "[STEP 1/5] "
         "Validation Score 계산"
     )
 
 
-    y_true, anomaly_scores = (
-        collect_validation_scores(
-            dataset_type,
-            chunksize=chunksize,
-        )
+    (
+        y_true,
+        anomaly_scores,
+        engineered_df,
+    ) = collect_validation_scores(
+
+        dataset_type,
+
+        max_files=max_files,
+
+        nrows_per_file=nrows_per_file,
     )
 
 
     # ========================================================
     # STEP 2
-    # Threshold 탐색
+    # 실제 Score 분포
     # ========================================================
 
     print()
     print(
-        "[STEP 2/4] "
-        "최적 Threshold 탐색"
+        "[STEP 2/5] "
+        "정상 / 이상 Score 분포 분석"
+    )
+
+
+    score_distribution = (
+        calculate_score_distribution(
+            y_true,
+            anomaly_scores,
+        )
+    )
+
+
+    print_score_distribution(
+        score_distribution
+    )
+
+
+    # ========================================================
+    # STEP 3
+    # Best Threshold
+    # ========================================================
+
+    print()
+    print(
+        "[STEP 3/5] "
+        "Best F1 Threshold 탐색"
     )
 
 
@@ -1201,6 +1671,7 @@ def evaluate_model(
     )
 
 
+    print()
     print(
         f"Threshold : "
         f"{threshold_result['threshold']:.8f}"
@@ -1223,48 +1694,81 @@ def evaluate_model(
 
 
     # ========================================================
-    # STEP 3
-    # 최종 평가
+    # STEP 4
+    # 후보 Threshold 비교
     # ========================================================
 
     print()
     print(
-        "[STEP 3/4] "
-        "평가 Metric 계산"
+        "[STEP 4/5] "
+        "Threshold 후보 비교"
+    )
+
+
+    threshold_candidates = (
+        compare_threshold_candidates(
+
+            y_true,
+
+            anomaly_scores,
+
+            threshold_result[
+                "threshold"
+            ],
+        )
+    )
+
+
+    print_threshold_candidates(
+        threshold_candidates
+    )
+
+
+    # ========================================================
+    # STEP 5
+    # Metric + 저장
+    # ========================================================
+
+    print()
+    print(
+        "[STEP 5/5] "
+        "Metric 계산 / 결과 저장"
     )
 
 
     metrics = calculate_metrics(
+
         y_true,
+
         anomaly_scores,
+
         threshold_result[
             "threshold"
         ],
     )
 
 
-    # ========================================================
-    # STEP 4
-    # 결과 저장
-    # ========================================================
+    threshold_data = (
+        save_threshold(
 
-    print()
-    print(
-        "[STEP 4/4] "
-        "Threshold / Metrics 저장"
-    )
+            dataset_type,
 
+            threshold_result,
 
-    threshold_data = save_threshold(
-        dataset_type,
-        threshold_result,
-        len(y_true),
+            len(
+                y_true
+            ),
+        )
     )
 
 
     save_metrics(
+
         dataset_type,
+
         metrics,
+
+        threshold_candidates,
     )
 
 
@@ -1298,33 +1802,49 @@ def evaluate_model(
 
 
     print_evaluation_summary(
+
         dataset_type,
+
         metrics,
     )
 
 
     return {
 
-        "threshold": (
-            threshold_data
-        ),
+        "threshold":
+            threshold_data,
 
-        "metrics": (
-            metrics
-        ),
+        "metrics":
+            metrics,
+
+        "threshold_candidates":
+            threshold_candidates,
     }
 
 
 # ============================================================
-# 13. 실행
+# 17. 실행
 # ============================================================
 
 if __name__ == "__main__":
 
-    # 현재는 전자금융공동망 평가
+    # ========================================================
+    # 처음에는 Validation 일부로 Pipeline 확인
+    #
+    # 정상적으로 동작하면:
+    #
+    # max_files=None
+    # nrows_per_file=None
+    #
+    # 로 변경하여 전체 Validation 평가
+    # ========================================================
+
     results = evaluate_model(
 
         dataset_type="electronic",
 
-        chunksize=100_000,
+        # 초기 테스트
+        max_files=None,
+
+        nrows_per_file=None,
     )

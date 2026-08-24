@@ -173,6 +173,135 @@ def validate_columns(
         f"추가 컬럼: {sorted(extra_columns)}"
     )
 
+# ============================================================
+# 6. 거래 시간순 정렬
+# ============================================================
+
+def sort_transactions(
+    df: pd.DataFrame,
+    dataset_type: str,
+) -> pd.DataFrame:
+    """
+    Historical Feature Engineering을 위해
+    거래 데이터를 과거 → 미래 순서로 정렬한다.
+
+    electronic
+        거래일자 + 거래시간대
+
+    card
+        승인일자 + 승인시간대
+    """
+
+    if dataset_type == "electronic":
+
+        required = [
+            "거래일자",
+            "거래시간대",
+        ]
+
+        missing = [
+            column
+            for column in required
+            if column not in df.columns
+        ]
+
+        if missing:
+            raise ValueError(
+                "전자금융 데이터 시간순 정렬에 "
+                f"필요한 컬럼이 없습니다: {missing}"
+            )
+
+        result = df.copy()
+
+        result["_sort_date"] = pd.to_numeric(
+            result["거래일자"],
+            errors="coerce",
+        )
+
+        result["_sort_hour"] = pd.to_numeric(
+            result["거래시간대"],
+            errors="coerce",
+        )
+
+        result = (
+            result
+            .sort_values(
+                by=[
+                    "_sort_date",
+                    "_sort_hour",
+                ],
+                kind="stable",
+            )
+            .drop(
+                columns=[
+                    "_sort_date",
+                    "_sort_hour",
+                ]
+            )
+            .reset_index(drop=True)
+        )
+
+        return result
+
+
+    elif dataset_type == "card":
+
+        required = [
+            "승인일자",
+            "승인시간대",
+        ]
+
+        missing = [
+            column
+            for column in required
+            if column not in df.columns
+        ]
+
+        if missing:
+            raise ValueError(
+                "카드 데이터 시간순 정렬에 "
+                f"필요한 컬럼이 없습니다: {missing}"
+            )
+
+        result = df.copy()
+
+        result["_sort_date"] = pd.to_numeric(
+            result["승인일자"],
+            errors="coerce",
+        )
+
+        result["_sort_hour"] = pd.to_numeric(
+            result["승인시간대"],
+            errors="coerce",
+        )
+
+        result = (
+            result
+            .sort_values(
+                by=[
+                    "_sort_date",
+                    "_sort_hour",
+                ],
+                kind="stable",
+            )
+            .drop(
+                columns=[
+                    "_sort_date",
+                    "_sort_hour",
+                ]
+            )
+            .reset_index(drop=True)
+        )
+
+        return result
+
+
+    else:
+        raise ValueError(
+            f"지원하지 않는 dataset_type입니다: "
+            f"{dataset_type}"
+        )
+
 
 # ============================================================
 # 6. 여러 CSV를 하나의 DataFrame으로 Load
@@ -317,12 +446,19 @@ def load_dataset(
         split,
     )
 
-    return load_csv_directory(
-        directory,
-        usecols=usecols,
-        nrows_per_file=nrows_per_file,
-        max_files=max_files,
+    df = load_csv_directory(
+    directory,
+    usecols=usecols,
+    nrows_per_file=nrows_per_file,
+    max_files=max_files,
+)
+
+    df = sort_transactions(
+        df,
+        dataset_type,
     )
+
+    return df
 
 
 # ============================================================
@@ -493,6 +629,51 @@ if __name__ == "__main__":
     print()
     print("[HEAD]")
     print(electronic_test.head())
+    
+    print()
+    print("[TIME ORDER CHECK]")
+
+    print(
+        electronic_test[
+            [
+                "거래일자",
+                "거래시간대",
+                "출금계좌일련번호",
+                "입금계좌일련번호",
+            ]
+        ].head(20)
+    )
+
+    print()
+    print("[LAST TRANSACTIONS]")
+
+    print(
+        electronic_test[
+            [
+                "거래일자",
+                "거래시간대",
+            ]
+        ].tail(20)
+    )
+    
+    sort_key = (
+        pd.to_numeric(
+            electronic_test["거래일자"],
+            errors="coerce",
+        )
+        * 100
+        +
+        pd.to_numeric(
+            electronic_test["거래시간대"],
+            errors="coerce",
+        )
+    )
+
+    print()
+    print(
+        "시간순 정렬 여부:",
+        sort_key.is_monotonic_increasing,
+    )
 
 '''
 for chunk in iter_dataset_chunks(

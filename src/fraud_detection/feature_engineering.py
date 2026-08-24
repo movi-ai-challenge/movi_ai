@@ -32,8 +32,12 @@ MISSING_CATEGORY = "__MISSING__"
 # ============================================================
 
 ELECTRONIC_REQUIRED_COLUMNS = [
+    "출금계좌일련번호",
+    "입금계좌일련번호",
+
     "출금금융회사일련번호",
     "입금금융회사일련번호",
+
     "자금구분",
     "거래금액",
     "거래시간대",
@@ -44,11 +48,25 @@ ELECTRONIC_REQUIRED_COLUMNS = [
 
 ELECTRONIC_NUMERIC_FEATURES = [
     "log_amount",
+
+    "amount_ratio",
+    "amount_zscore",
+
     "hour_sin",
     "hour_cos",
+    "is_night",
+
     "weekday",
     "is_weekend",
+
     "same_bank",
+
+    "new_recipient",
+    "unusual_medium",
+
+    "historical_transaction_count",
+    "same_day_transaction_count",
+    "same_time_bucket_count",
 ]
 
 
@@ -140,7 +158,6 @@ CARD_CATEGORICAL_FEATURES = [
 # ============================================================
 
 FEATURE_CONFIGS = {
-
     "electronic": {
         "required_columns": ELECTRONIC_REQUIRED_COLUMNS,
         "numeric_features": ELECTRONIC_NUMERIC_FEATURES,
@@ -167,7 +184,6 @@ def get_feature_config(
     """
 
     if dataset_type not in FEATURE_CONFIGS:
-
         raise ValueError(
             f"지원하지 않는 dataset_type입니다: {dataset_type}\n"
             f"사용 가능한 값: {list(FEATURE_CONFIGS.keys())}"
@@ -197,7 +213,6 @@ def validate_required_columns(
     ]
 
     if missing_columns:
-
         raise ValueError(
             f"\n[{dataset_type}] Feature Engineering에 "
             f"필요한 컬럼이 없습니다.\n"
@@ -231,22 +246,7 @@ def normalize_categorical(
 ) -> pd.Series:
     """
     범주형 Feature의 타입을 문자열로 통일한다.
-
-    예:
-        155 -> "155"
-        2   -> "2"
-        "00" -> "00"
-        NaN -> "__MISSING__"
-
-    카드 데이터에는
-        C, Q, A, _, 00
-    같은 문자열 코드도 존재하기 때문에
-    문자열 코드는 그대로 유지한다.
     """
-
-    # --------------------------------------------------------
-    # 숫자형 Category
-    # --------------------------------------------------------
 
     if is_numeric_dtype(series):
 
@@ -257,7 +257,6 @@ def normalize_categorical(
 
         valid_values = numeric.dropna()
 
-        # 1.0 / 2.0처럼 실제 의미는 정수 코드인 경우
         if (
             len(valid_values) == 0
             or np.all(
@@ -276,12 +275,7 @@ def normalize_categorical(
             )
 
         else:
-
             result = numeric.astype("string")
-
-    # --------------------------------------------------------
-    # 문자열 Category
-    # --------------------------------------------------------
 
     else:
 
@@ -304,7 +298,7 @@ def parse_yyyymmdd(
     series: pd.Series,
 ) -> pd.Series:
     """
-    20240321 형태의 정수 날짜를 datetime으로 변환한다.
+    20240321 형태의 날짜를 datetime으로 변환한다.
     """
 
     date_string = (
@@ -333,10 +327,6 @@ def create_hour_features(
 ) -> tuple[pd.Series, pd.Series]:
     """
     시간값을 sin/cos 두 Feature로 변환한다.
-
-    예:
-        23시와 0시가 서로 가까운 시간이라는
-        순환 구조를 모델에 표현하기 위함.
     """
 
     hour = to_numeric(series)
@@ -356,38 +346,274 @@ def create_hour_features(
 
 
 # ============================================================
-# 11. 전자금융공동망 Feature Engineering
+# 11. 전자금융 Historical Feature
+# ============================================================
+
+def create_electronic_historical_features(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    과거 거래 이력을 기반으로 Historical Feature 생성.
+
+    생성 Feature
+    ----------------------------------
+    amount_ratio
+    amount_zscore
+    new_recipient
+    unusual_medium
+    historical_transaction_count
+    same_day_transaction_count
+    same_time_bucket_count
+    """
+
+    history = pd.DataFrame(
+        index=df.index
+    )
+
+    amount = (
+        to_numeric(df["거래금액"])
+        .clip(lower=0)
+    )
+
+    sender = normalize_categorical(
+        df["출금계좌일련번호"]
+    )
+
+    receiver = normalize_categorical(
+        df["입금계좌일련번호"]
+    )
+
+    medium = normalize_categorical(
+        df["매체구분"]
+    )
+
+
+    # ========================================================
+    # 사용자별 과거 평균 거래금액
+    # ========================================================
+
+    historical_mean = (
+        amount
+        .groupby(sender)
+        .transform(
+            lambda x:
+                x.expanding()
+                .mean()
+                .shift(1)
+        )
+    )
+
+
+    # ========================================================
+    # 사용자별 과거 표준편차
+    # ========================================================
+
+    historical_std = (
+        amount
+        .groupby(sender)
+        .transform(
+            lambda x:
+                x.expanding()
+                .std()
+                .shift(1)
+        )
+    )
+
+
+    # ========================================================
+    # amount_ratio
+    # ========================================================
+
+    history["amount_ratio"] = (
+        amount
+        /
+        historical_mean.replace(
+            0,
+            np.nan,
+        )
+    )
+
+
+    # ========================================================
+    # amount_zscore
+    # ========================================================
+
+    history["amount_zscore"] = (
+        amount - historical_mean
+    ) / historical_std.replace(
+        0,
+        np.nan,
+    )
+
+
+    # ========================================================
+    # 신규 수취인
+    # ========================================================
+
+    pair_count = (
+        pd.DataFrame(
+            {
+                "sender": sender,
+                "receiver": receiver,
+            },
+            index=df.index,
+        )
+        .groupby(
+            [
+                "sender",
+                "receiver",
+            ]
+        )
+        .cumcount()
+    )
+
+    history["new_recipient"] = (
+        pair_count == 0
+    ).astype("int8")
+
+
+    # ========================================================
+    # 평소 사용하지 않던 매체
+    # ========================================================
+
+    sender_medium_count = (
+        pd.DataFrame(
+            {
+                "sender": sender,
+                "medium": medium,
+            },
+            index=df.index,
+        )
+        .groupby(
+            [
+                "sender",
+                "medium",
+            ]
+        )
+        .cumcount()
+    )
+
+    sender_total_count = (
+        sender
+        .groupby(sender)
+        .cumcount()
+    )
+
+    history["unusual_medium"] = (
+        (sender_total_count > 0)
+        &
+        (sender_medium_count == 0)
+    ).astype("int8")
+
+
+    # ========================================================
+    # 전체 과거 거래 횟수
+    # ========================================================
+
+    history[
+        "historical_transaction_count"
+    ] = (
+        sender
+        .groupby(sender)
+        .cumcount()
+        .astype("int32")
+    )
+
+
+    # ========================================================
+    # 같은 날짜 내 이전 거래 횟수
+    # ========================================================
+
+    transaction_date = (
+        pd.to_numeric(
+            df["거래일자"],
+            errors="coerce",
+        )
+    )
+
+    same_day_count = (
+        pd.DataFrame(
+            {
+                "sender": sender,
+                "date": transaction_date,
+            },
+            index=df.index,
+        )
+        .groupby(
+            [
+                "sender",
+                "date",
+            ]
+        )
+        .cumcount()
+    )
+
+    history[
+        "same_day_transaction_count"
+    ] = (
+        same_day_count
+        .astype("int32")
+    )
+
+
+    # ========================================================
+    # 같은 날짜 + 같은 시간대 이전 거래 횟수
+    # ========================================================
+
+    transaction_hour = (
+        pd.to_numeric(
+            df["거래시간대"],
+            errors="coerce",
+        )
+    )
+
+    same_time_bucket_count = (
+        pd.DataFrame(
+            {
+                "sender": sender,
+                "date": transaction_date,
+                "hour": transaction_hour,
+            },
+            index=df.index,
+        )
+        .groupby(
+            [
+                "sender",
+                "date",
+                "hour",
+            ]
+        )
+        .cumcount()
+    )
+
+    history[
+        "same_time_bucket_count"
+    ] = (
+        same_time_bucket_count
+        .astype("int32")
+    )
+
+
+    # ========================================================
+    # 무한대 방지
+    # ========================================================
+
+    history.replace(
+        [np.inf, -np.inf],
+        np.nan,
+        inplace=True,
+    )
+
+    return history
+
+
+# ============================================================
+# 12. 전자금융 Feature Engineering
 # ============================================================
 
 def engineer_electronic_features(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    전자금융공동망 원본 데이터를
-    Isolation Forest용 Feature로 변환한다.
-
-    원본
-    ----------------------------------
-    거래금액
-    거래시간대
-    거래일자
-    출금금융회사
-    입금금융회사
-    자금구분
-    매체구분
-
-    ↓
-
-    Feature
-    ----------------------------------
-    log_amount
-    hour_sin
-    hour_cos
-    weekday
-    is_weekend
-    same_bank
-    + categorical features
-    """
 
     validate_required_columns(
         df,
@@ -399,25 +625,19 @@ def engineer_electronic_features(
         index=df.index
     )
 
-    # ========================================================
-    # 거래 금액
-    # ========================================================
 
+    # 거래 금액
     amount = (
         to_numeric(df["거래금액"])
         .clip(lower=0)
     )
 
-    # 금액 분포의 극단적인 왜도를 줄임
     features["log_amount"] = np.log1p(
         amount
     )
 
 
-    # ========================================================
     # 거래 시간
-    # ========================================================
-
     (
         features["hour_sin"],
         features["hour_cos"],
@@ -425,11 +645,18 @@ def engineer_electronic_features(
         df["거래시간대"]
     )
 
+    hour = to_numeric(
+        df["거래시간대"]
+    )
 
-    # ========================================================
+    features["is_night"] = (
+        hour.isin(
+            [0, 3]
+        )
+    ).astype("int8")
+
+
     # 거래 일자
-    # ========================================================
-
     transaction_date = parse_yyyymmdd(
         df["거래일자"]
     )
@@ -449,10 +676,7 @@ def engineer_electronic_features(
     )
 
 
-    # ========================================================
     # 동일 금융회사 여부
-    # ========================================================
-
     sender_bank = normalize_categorical(
         df["출금금융회사일련번호"]
     )
@@ -466,26 +690,40 @@ def engineer_electronic_features(
     ).astype("int8")
 
 
-    # ========================================================
-    # 범주형 Feature
-    # ========================================================
+    # 범주형
+    features[
+        "출금금융회사일련번호"
+    ] = sender_bank
 
-    features["출금금융회사일련번호"] = sender_bank
+    features[
+        "입금금융회사일련번호"
+    ] = receiver_bank
 
-    features["입금금융회사일련번호"] = receiver_bank
-
-    features["자금구분"] = normalize_categorical(
-        df["자금구분"]
+    features["자금구분"] = (
+        normalize_categorical(
+            df["자금구분"]
+        )
     )
 
-    features["매체구분"] = normalize_categorical(
-        df["매체구분"]
+    features["매체구분"] = (
+        normalize_categorical(
+            df["매체구분"]
+        )
     )
 
 
-    # ========================================================
-    # 무한대 방지
-    # ========================================================
+    # Historical Feature
+    historical_features = (
+        create_electronic_historical_features(
+            df
+        )
+    )
+
+    for column in historical_features.columns:
+        features[column] = (
+            historical_features[column]
+        )
+
 
     features.replace(
         [np.inf, -np.inf],
@@ -497,15 +735,12 @@ def engineer_electronic_features(
 
 
 # ============================================================
-# 12. 카드거래 Feature Engineering
+# 13. 카드거래 Feature Engineering
 # ============================================================
 
 def engineer_card_features(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    카드거래 데이터를 Isolation Forest용 Feature로 변환한다.
-    """
 
     validate_required_columns(
         df,
@@ -517,10 +752,6 @@ def engineer_card_features(
         index=df.index
     )
 
-
-    # ========================================================
-    # 거래 금액
-    # ========================================================
 
     amount = (
         to_numeric(df["통합승인금액"])
@@ -536,14 +767,12 @@ def engineer_card_features(
         amount
     )
 
-    features["log_card_limit"] = np.log1p(
-        card_limit
+    features["log_card_limit"] = (
+        np.log1p(
+            card_limit
+        )
     )
 
-
-    # 카드 한도 대비 승인금액 비율
-    #
-    # 한도가 0인 경우 Division by Zero 방지를 위해 NaN 처리
     features["amount_limit_ratio"] = (
         amount
         /
@@ -554,10 +783,6 @@ def engineer_card_features(
     )
 
 
-    # ========================================================
-    # 승인 시간
-    # ========================================================
-
     (
         features["hour_sin"],
         features["hour_cos"],
@@ -565,10 +790,6 @@ def engineer_card_features(
         df["승인시간대"]
     )
 
-
-    # ========================================================
-    # 승인 일자
-    # ========================================================
 
     approval_date = parse_yyyymmdd(
         df["승인일자"]
@@ -589,29 +810,17 @@ def engineer_card_features(
     )
 
 
-    # ========================================================
-    # 회원 특성
-    # ========================================================
-
     features["age"] = to_numeric(
         df["연령"]
     )
 
 
-    # ========================================================
-    # 최근 카드 이용 패턴
-    # ========================================================
-
-    features["days_since_last_use"] = (
-        to_numeric(
-            df["경과일수_최종이용일자"]
-        )
+    features[
+        "days_since_last_use"
+    ] = to_numeric(
+        df["경과일수_최종이용일자"]
     )
 
-
-    # ========================================================
-    # 가맹점 전월 매출
-    # ========================================================
 
     previous_sales_count = (
         to_numeric(
@@ -640,10 +849,6 @@ def engineer_card_features(
     )
 
 
-    # ========================================================
-    # 할부 가능 개월 수
-    # ========================================================
-
     features[
         "installment_available_months"
     ] = to_numeric(
@@ -651,22 +856,13 @@ def engineer_card_features(
     )
 
 
-    # ========================================================
-    # 범주형 Feature
-    # ========================================================
-
     for column in CARD_CATEGORICAL_FEATURES:
-
         features[column] = (
             normalize_categorical(
                 df[column]
             )
         )
 
-
-    # ========================================================
-    # 무한대 값 처리
-    # ========================================================
 
     features.replace(
         [np.inf, -np.inf],
@@ -678,16 +874,13 @@ def engineer_card_features(
 
 
 # ============================================================
-# 13. 공통 Feature Engineering 함수
+# 14. 공통 Feature Engineering 함수
 # ============================================================
 
 def engineer_features(
     df: pd.DataFrame,
     dataset_type: str,
 ) -> pd.DataFrame:
-    """
-    dataset_type에 따라 적절한 Feature Engineering 수행.
-    """
 
     if dataset_type == "electronic":
 
@@ -710,18 +903,12 @@ def engineer_features(
 
 
 # ============================================================
-# 14. Target 추출
+# 15. Target 추출
 # ============================================================
 
 def extract_target(
     df: pd.DataFrame,
 ) -> pd.Series:
-    """
-    이상거래여부 Target을 추출한다.
-
-    Feature Engineering과 Target을 명확하게 분리하여
-    Target Leakage를 방지한다.
-    """
 
     if TARGET_COLUMN not in df.columns:
 
@@ -742,7 +929,9 @@ def extract_target(
             "값이 존재합니다."
         )
 
-    target = target.astype("int8")
+    target = target.astype(
+        "int8"
+    )
 
     unique_values = set(
         target.unique()
@@ -761,24 +950,12 @@ def extract_target(
 
 
 # ============================================================
-# 15. Preprocessor 생성
+# 16. Preprocessor 생성
 # ============================================================
 
 def build_preprocessor(
     dataset_type: str,
 ) -> ColumnTransformer:
-    """
-    숫자형 / 범주형 Feature를
-    Isolation Forest 입력 형태로 변환하는 Preprocessor 생성.
-
-    Numeric
-        ↓
-    NaN → Median
-
-    Categorical
-        ↓
-    One-Hot Encoding
-    """
 
     config = get_feature_config(
         dataset_type
@@ -793,41 +970,22 @@ def build_preprocessor(
     ]
 
 
-    # ========================================================
-    # Numeric Pipeline
-    # ========================================================
-
     numeric_transformer = SimpleImputer(
         strategy="median"
     )
 
 
-    # ========================================================
-    # Categorical Pipeline
-    # ========================================================
-
-    categorical_transformer = OneHotEncoder(
-
-        # Validation / 실제 서비스에서
-        # Train에 없던 범주가 등장해도 에러를 내지 않음
-        handle_unknown="ignore",
-
-        # 대용량 데이터이므로 Dense Matrix 대신 Sparse Matrix
-        sparse_output=True,
-
-        # 메모리 사용량 감소
-        dtype=np.float32,
+    categorical_transformer = (
+        OneHotEncoder(
+            handle_unknown="ignore",
+            sparse_output=True,
+            dtype=np.float32,
+        )
     )
 
 
-    # ========================================================
-    # Column Transformer
-    # ========================================================
-
     preprocessor = ColumnTransformer(
-
         transformers=[
-
             (
                 "num",
                 numeric_transformer,
@@ -841,10 +999,7 @@ def build_preprocessor(
             ),
         ],
 
-        # 지정하지 않은 컬럼 제거
         remainder="drop",
-
-        # 가능하면 Sparse Matrix 유지
         sparse_threshold=1.0,
     )
 
@@ -852,29 +1007,13 @@ def build_preprocessor(
 
 
 # ============================================================
-# 16. Train용 Fit + Transform
+# 17. Train용 Fit + Transform
 # ============================================================
 
 def fit_transform_features(
     df: pd.DataFrame,
     dataset_type: str,
 ):
-    """
-    Train 데이터용 함수.
-
-    1. Feature Engineering
-    2. Preprocessor 생성
-    3. fit
-    4. transform
-
-    Returns
-    -------
-    X
-        Isolation Forest 입력 Matrix
-
-    preprocessor
-        학습된 전처리 객체
-    """
 
     engineered_df = engineer_features(
         df,
@@ -889,7 +1028,6 @@ def fit_transform_features(
         engineered_df
     )
 
-    # IsolationForest 효율을 위해 float32
     X = X.astype(
         np.float32
     )
@@ -901,7 +1039,7 @@ def fit_transform_features(
 
 
 # ============================================================
-# 17. Validation / Inference용 Transform
+# 18. Validation / Inference용 Transform
 # ============================================================
 
 def transform_features(
@@ -909,15 +1047,6 @@ def transform_features(
     dataset_type: str,
     preprocessor,
 ):
-    """
-    이미 Train에서 학습된 Preprocessor를 사용한다.
-
-    주의:
-        Validation / Inference에서는
-        절대로 fit_transform()을 호출하지 않는다.
-
-        반드시 transform()만 사용한다.
-    """
 
     engineered_df = engineer_features(
         df,
@@ -936,16 +1065,12 @@ def transform_features(
 
 
 # ============================================================
-# 18. 최종 Feature 이름 확인
+# 19. 최종 Feature 이름
 # ============================================================
 
 def get_transformed_feature_names(
     preprocessor,
 ) -> list[str]:
-    """
-    One-Hot Encoding 후 실제 모델에 입력되는
-    Feature 이름 목록을 반환한다.
-    """
 
     return (
         preprocessor
@@ -955,7 +1080,7 @@ def get_transformed_feature_names(
 
 
 # ============================================================
-# 19. Feature 정보 출력
+# 20. Feature 정보 출력
 # ============================================================
 
 def print_feature_summary(
@@ -963,13 +1088,13 @@ def print_feature_summary(
     engineered_df: pd.DataFrame,
     dataset_type: str,
 ) -> None:
-    """
-    Feature Engineering 결과 확인용.
-    """
 
     print()
     print("=" * 70)
-    print(f"FEATURE SUMMARY : {dataset_type}")
+    print(
+        f"FEATURE SUMMARY : "
+        f"{dataset_type}"
+    )
     print("=" * 70)
 
     print(
@@ -983,7 +1108,6 @@ def print_feature_summary(
     )
 
     print()
-
     print("[Engineered Features]")
 
     for column in engineered_df.columns:
@@ -992,6 +1116,7 @@ def print_feature_summary(
             f"- {column:<35} "
             f"{engineered_df[column].dtype}"
         )
+
 
     print()
     print("[Missing Values]")
@@ -1007,45 +1132,38 @@ def print_feature_summary(
     ]
 
     if len(missing) == 0:
-
         print("없음")
 
     else:
-
         print(missing)
 
     print("=" * 70)
 
 
 # ============================================================
-# 20. 테스트
+# 21. 테스트
 # ============================================================
 
 if __name__ == "__main__":
 
     try:
         from .data_loader import load_dataset
-
     except ImportError:
         from data_loader import load_dataset
 
 
-    # ========================================================
-    # 전자금융 테스트
-    # ========================================================
-
     print()
-    print("전자금융 Feature Engineering 테스트")
+    print(
+        "전자금융 Feature Engineering 테스트"
+    )
     print()
 
 
     electronic_df = load_dataset(
         dataset_type="electronic",
         split="train",
-
-        # 전체 데이터가 아닌 테스트용
         max_files=1,
-        nrows_per_file=1_000,
+        nrows_per_file=50_000,
     )
 
 
@@ -1056,6 +1174,36 @@ if __name__ == "__main__":
     )
 
 
+    # ========================================================
+    # Historical Feature 확인
+    # ========================================================
+
+    print()
+    print("[Historical Features]")
+
+    columns = [
+        "log_amount",
+        "amount_ratio",
+        "amount_zscore",
+        "is_night",
+        "new_recipient",
+        "unusual_medium",
+        "historical_transaction_count",
+        "same_day_transaction_count",
+        "same_time_bucket_count",
+    ]
+
+    print(
+        electronic_features[
+            columns
+        ].head(20)
+    )
+
+
+    # ========================================================
+    # Feature Summary
+    # ========================================================
+
     print_feature_summary(
         electronic_df,
         electronic_features,
@@ -1063,18 +1211,21 @@ if __name__ == "__main__":
     )
 
 
-    X_electronic, electronic_preprocessor = (
-        fit_transform_features(
-            electronic_df,
-            "electronic",
-        )
+    # ========================================================
+    # Preprocessor 테스트
+    # ========================================================
+
+    (
+        X_electronic,
+        electronic_preprocessor,
+    ) = fit_transform_features(
+        electronic_df,
+        "electronic",
     )
 
 
     print()
-    print(
-        "[전자금융 최종 Matrix]"
-    )
+    print("[전자금융 최종 Matrix]")
 
     print(
         "Shape:",
@@ -1093,7 +1244,7 @@ if __name__ == "__main__":
 
 
     # ========================================================
-    # 실제 변환된 Feature 개수
+    # 실제 Feature 이름
     # ========================================================
 
     feature_names = (
@@ -1109,15 +1260,228 @@ if __name__ == "__main__":
         f"{len(feature_names)}"
     )
 
-
     print()
     print(
         "첫 20개 Feature:"
     )
 
     for name in feature_names[:20]:
-
         print(
             "-",
             name,
         )
+
+
+    # ========================================================
+    # Historical Feature 통계
+    # ========================================================
+
+    print()
+    print("[Historical Feature 통계]")
+
+    print(
+        electronic_features[
+            [
+                "amount_ratio",
+                "amount_zscore",
+                "new_recipient",
+                "unusual_medium",
+                "historical_transaction_count",
+                "same_day_transaction_count",
+                "same_time_bucket_count",
+            ]
+        ].describe()
+    )
+
+
+    # ========================================================
+    # 신규 수취인
+    # ========================================================
+
+    print()
+    print("[신규 수취인 분포]")
+
+    print(
+        electronic_features[
+            "new_recipient"
+        ]
+        .value_counts(
+            dropna=False
+        )
+        .sort_index()
+    )
+
+
+    # ========================================================
+    # 과거 누적 거래
+    # ========================================================
+
+    print()
+    print("[과거 누적 거래 횟수 분포]")
+
+    print(
+        electronic_features[
+            "historical_transaction_count"
+        ]
+        .value_counts()
+        .sort_index()
+        .head(10)
+    )
+
+
+    # ========================================================
+    # 같은 날짜 거래
+    # ========================================================
+
+    print()
+    print("[같은 날짜 거래 횟수 분포]")
+
+    print(
+        electronic_features[
+            "same_day_transaction_count"
+        ]
+        .value_counts()
+        .sort_index()
+        .head(10)
+    )
+
+
+    # ========================================================
+    # 같은 시간대 거래
+    # ========================================================
+
+    print()
+    print("[같은 시간대 거래 횟수 분포]")
+
+    print(
+        electronic_features[
+            "same_time_bucket_count"
+        ]
+        .value_counts()
+        .sort_index()
+        .head(10)
+    )
+
+
+    # ========================================================
+    # 최대값
+    # ========================================================
+
+    print()
+    print("[최대 거래 횟수]")
+
+    print(
+        "Max Historical Count:",
+        electronic_features[
+            "historical_transaction_count"
+        ].max()
+    )
+
+    print(
+        "Max Same Day Count:",
+        electronic_features[
+            "same_day_transaction_count"
+        ].max()
+    )
+
+    print(
+        "Max Same Time Bucket Count:",
+        electronic_features[
+            "same_time_bucket_count"
+        ].max()
+    )
+
+
+    # ========================================================
+    # 거래시간대
+    # ========================================================
+
+    print()
+    print("[거래시간대 분포]")
+
+    print(
+        electronic_df[
+            "거래시간대"
+        ]
+        .value_counts()
+        .sort_index()
+    )
+
+
+    # ========================================================
+    # 반복거래 상위값
+    # ========================================================
+
+    print()
+    print(
+        "[Same Day Transaction Count 상위 값]"
+    )
+
+    print(
+        electronic_features[
+            "same_day_transaction_count"
+        ]
+        .value_counts()
+        .sort_index()
+        .tail(10)
+    )
+
+
+    print()
+    print(
+        "[Same Time Bucket Count 상위 값]"
+    )
+
+    print(
+        electronic_features[
+            "same_time_bucket_count"
+        ]
+        .value_counts()
+        .sort_index()
+        .tail(10)
+    )
+
+
+    # ========================================================
+    # 비정상 매체
+    # ========================================================
+
+    print()
+    print("[비정상 매체 사용 분포]")
+
+    print(
+        electronic_features[
+            "unusual_medium"
+        ]
+        .value_counts(
+            dropna=False
+        )
+        .sort_index()
+    )
+
+
+    # ========================================================
+    # 신규 수취인 + 비정상 매체
+    # ========================================================
+
+    print()
+    print(
+        "[신규 수취인 + 비정상 매체 조합]"
+    )
+
+    print(
+        pd.crosstab(
+            electronic_features[
+                "new_recipient"
+            ],
+            electronic_features[
+                "unusual_medium"
+            ],
+            rownames=[
+                "new_recipient"
+            ],
+            colnames=[
+                "unusual_medium"
+            ],
+        )
+    )

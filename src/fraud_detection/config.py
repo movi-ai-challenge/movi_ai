@@ -270,10 +270,10 @@ TRAIN_SAMPLE_SIZE = 300_000
 ISOLATION_FOREST_PARAMS = {
 
     # 생성할 Isolation Tree 개수
-    "n_estimators": 200,
+    "n_estimators": 300,
 
     # 각 Tree가 학습할 최대 Sample
-    "max_samples": 4096,
+    "max_samples": "auto",
 
     # Threshold는 Validation에서 별도로 결정할 예정
     "contamination": "auto",

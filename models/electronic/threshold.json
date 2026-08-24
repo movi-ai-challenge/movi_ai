@@ -3,10 +3,10 @@
     "score_definition": "anomaly_score = -model.score_samples(X)",
     "rule": "fraud if anomaly_score >= threshold",
     "selection_method": "max_f1_on_validation",
-    "threshold": 0.39340506040183176,
-    "precision_at_threshold": 0.06724165468774956,
-    "recall_at_threshold": 0.22064989517819705,
-    "f1_at_threshold": 0.10307259150446811,
+    "threshold": 0.44611697461968036,
+    "precision_at_threshold": 0.09257898603967671,
+    "recall_at_threshold": 0.19811320754716982,
+    "f1_at_threshold": 0.12618928392588885,
     "validation_size": 492678,
-    "created_at": "2026-08-12T23:44:45.894954+09:00"
+    "created_at": "2026-08-25T06:44:21.934051+09:00"
 }

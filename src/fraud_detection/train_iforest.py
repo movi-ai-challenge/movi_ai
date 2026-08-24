@@ -29,12 +29,13 @@ try:
     )
 
     from .data_loader import (
-        iter_dataset_chunks,
+        load_dataset,
     )
 
     from .feature_engineering import (
         get_feature_config,
-        fit_transform_features,
+        engineer_features,
+        build_preprocessor,
         get_transformed_feature_names,
     )
 
@@ -50,12 +51,13 @@ except ImportError:
     )
 
     from data_loader import (
-        iter_dataset_chunks,
+        load_dataset,
     )
 
     from feature_engineering import (
         get_feature_config,
-        fit_transform_features,
+        engineer_features,
+        build_preprocessor,
         get_transformed_feature_names,
     )
 
@@ -102,17 +104,14 @@ def get_training_columns(
     dataset_type: str,
 ) -> list[str]:
     """
-    CSV에서 실제 학습에 필요한 컬럼만 읽기 위한 함수.
+    학습에 필요한 원본 CSV 컬럼 목록을 반환한다.
 
-    전체 CSV 컬럼을 모두 읽지 않고
+    Feature Engineering에 필요한 컬럼
+    +
+    이상거래여부(Target)
 
-        Feature Engineering에 필요한 컬럼
-        +
-        이상거래여부
-
-    만 읽는다.
-
-    메모리 사용량 감소 목적.
+    Target은 Isolation Forest 입력에는 사용하지 않고,
+    Historical Feature 계산 후 정상거래만 추출할 때 사용한다.
     """
 
     dataset_config = get_dataset_config(
@@ -142,65 +141,58 @@ def get_training_columns(
 
 
 # ============================================================
-# 4. 정상거래 추출
+# 4. Historical Feature 기반 학습 데이터 준비
 # ============================================================
 
-def extract_normal_transactions(
-    chunk: pd.DataFrame,
-    target_column: str,
-) -> pd.DataFrame:
-    """
-    이상거래여부 == 0 인 정상거래만 반환한다.
-
-    Isolation Forest Baseline은
-    정상 패턴을 기준으로 학습한다.
-    """
-
-    target = pd.to_numeric(
-        chunk[target_column],
-        errors="coerce",
-    )
-
-    normal_mask = (
-        target == 0
-    )
-
-    normal_df = (
-        chunk.loc[normal_mask]
-        .copy()
-    )
-
-    return normal_df
-
-
-# ============================================================
-# 5. 정상거래 Uniform Sampling
-# ============================================================
-
-def collect_normal_sample(
+def prepare_historical_training_sample(
     dataset_type: str,
+    *,
     sample_size: int = TRAIN_SAMPLE_SIZE,
-    chunksize: int = 100_000,
     random_state: int = RANDOM_STATE,
-) -> tuple[pd.DataFrame, int]:
+    max_files: int | None = None,
+    nrows_per_file: int | None = None,
+) -> tuple[pd.DataFrame, int, int]:
     """
-    Train 데이터 전체를 Chunk 단위로 순회하면서
-    정상거래 중 sample_size개를 균등하게 Sampling한다.
+    Historical Feature를 사용하는 Isolation Forest 학습 데이터를 준비한다.
 
-    단순히 앞의 30만 건만 사용하는 것이 아니라
-    모든 Train 정상거래에 랜덤 우선순위를 부여하고
-    그중 가장 작은 sample_size개를 유지한다.
+    중요
+    ----------------------------------------------------------
 
-    이를 통해 특정 월 / 특정 파일 앞부분에
-    학습 데이터가 편향되는 것을 줄인다.
+    잘못된 순서:
+
+        정상거래 추출
+        ↓
+        Random Sampling
+        ↓
+        Historical Feature Engineering
+
+    위 방식은 거래 이력이 사라지므로 amount_ratio,
+    new_recipient 등의 값이 왜곡될 수 있다.
+
+
+    올바른 순서:
+
+        전체 거래 Load
+        ↓
+        시간순 정렬
+        ↓
+        전체 거래 기준 Historical Feature Engineering
+        ↓
+        정상거래만 추출
+        ↓
+        Random Sampling
+
 
     Returns
     -------
-    sample_df
-        최종 정상거래 Sample
+    normal_features
+        Feature Engineering이 끝난 정상거래 Sample
 
     total_normal_seen
-        전체 Train에서 확인한 정상거래 개수
+        전체 로드 데이터 중 정상거래 수
+
+    total_rows_seen
+        전체 로드 거래 수
     """
 
     dataset_config = get_dataset_config(
@@ -215,243 +207,235 @@ def collect_normal_sample(
         dataset_type
     )
 
-    rng = np.random.default_rng(
-        random_state
-    )
-
-    # 최종적으로 유지할 Sample
-    reservoir = None
-
-    total_rows_seen = 0
-    total_normal_seen = 0
-    chunk_count = 0
-
 
     print()
     print("=" * 70)
-    print("NORMAL TRANSACTION SAMPLING")
+    print("HISTORICAL TRAINING DATA PREPARATION")
     print("=" * 70)
 
     print(
-        f"Dataset      : {dataset_type}"
+        f"Dataset       : {dataset_type}"
     )
 
     print(
-        f"Target Sample: {sample_size:,}"
+        f"Target Sample : {sample_size:,}"
     )
 
-    print(
-        f"Chunk Size   : {chunksize:,}"
-    )
+    if max_files is not None:
+        print(
+            f"Max Files     : {max_files}"
+        )
+
+    if nrows_per_file is not None:
+        print(
+            f"Rows / File   : {nrows_per_file:,}"
+        )
 
     print("=" * 70)
 
 
     # ========================================================
-    # 전체 Train 데이터 순회
+    # STEP 1
+    # 전체 거래 Load
+    #
+    # load_dataset() 내부에서
+    # 거래일자 + 거래시간대 기준으로
+    # 과거 → 미래 정렬이 이루어진다.
     # ========================================================
 
-    for chunk in iter_dataset_chunks(
+    print()
+    print("[1/4] 전체 거래 Load")
+
+    raw_df = load_dataset(
         dataset_type=dataset_type,
         split="train",
-        chunksize=chunksize,
         usecols=usecols,
-    ):
+        max_files=max_files,
+        nrows_per_file=nrows_per_file,
+    )
 
-        chunk_count += 1
+    total_rows_seen = len(
+        raw_df
+    )
 
-        total_rows_seen += len(
-            chunk
-        )
-
-
-        # ====================================================
-        # 정상거래만 추출
-        # ====================================================
-
-        normal_chunk = (
-            extract_normal_transactions(
-                chunk,
-                target_column,
-            )
-        )
-
-        normal_count = len(
-            normal_chunk
-        )
-
-        total_normal_seen += (
-            normal_count
-        )
-
-
-        # 정상 데이터가 없는 Chunk는 Skip
-        if normal_count == 0:
-
-            continue
-
-
-        # ====================================================
-        # 각 행에 Random Priority 부여
-        # ====================================================
-
-        normal_chunk[
-            "__sample_priority__"
-        ] = rng.random(
-            normal_count
-        )
-
-
-        # ====================================================
-        # 기존 Sample + 새로운 Chunk 결합
-        # ====================================================
-
-        if reservoir is None:
-
-            candidates = (
-                normal_chunk
-            )
-
-        else:
-
-            candidates = pd.concat(
-                [
-                    reservoir,
-                    normal_chunk,
-                ],
-                ignore_index=True,
-                copy=False,
-            )
-
-
-        # ====================================================
-        # Priority가 가장 작은 K개만 유지
-        #
-        # 각 행에 독립적인 난수를 부여한 뒤
-        # 전역에서 작은 K개를 유지하므로
-        # 전체 Train 데이터에서 Random Sample하는 것과
-        # 같은 효과를 얻는다.
-        # ====================================================
-
-        if len(candidates) > sample_size:
-
-            reservoir = (
-                candidates
-                .nsmallest(
-                    sample_size,
-                    "__sample_priority__",
-                )
-                .reset_index(
-                    drop=True
-                )
-            )
-
-        else:
-
-            reservoir = (
-                candidates
-                .reset_index(
-                    drop=True
-                )
-            )
-
-
-        # ====================================================
-        # 진행상황 출력
-        # ====================================================
-
-        print(
-            f"[Chunk {chunk_count:>3}] "
-            f"전체={total_rows_seen:>10,} | "
-            f"정상={total_normal_seen:>10,} | "
-            f"보관={len(reservoir):>8,}"
-        )
-
-
-    # ========================================================
-    # 데이터가 아예 없는 경우
-    # ========================================================
-
-    if reservoir is None:
-
-        raise RuntimeError(
-            "정상거래 데이터를 찾을 수 없습니다."
-        )
-
-
-    # ========================================================
-    # Priority 임시 컬럼 제거
-    # ========================================================
-
-    reservoir.drop(
-        columns=[
-            "__sample_priority__"
-        ],
-        inplace=True,
+    print()
+    print(
+        f"전체 거래 수 : {total_rows_seen:,}"
     )
 
 
     # ========================================================
-    # Sample Size 검증
+    # STEP 2
+    # 전체 거래 기준 Feature Engineering
+    #
+    # 정상/이상 여부와 관계없이 실제 거래 History를
+    # 그대로 사용해야 Historical Feature가 정확하다.
     # ========================================================
 
-    if len(reservoir) < sample_size:
+    print()
+    print(
+        "[2/4] Historical Feature Engineering"
+    )
 
-        print()
-        print(
-            "[WARNING] 전체 정상거래 수가 "
-            "요청 Sample Size보다 작습니다."
-        )
-
-        print(
-            f"요청 : {sample_size:,}"
-        )
-
-        print(
-            f"실제 : {len(reservoir):,}"
-        )
+    engineered_df = engineer_features(
+        raw_df,
+        dataset_type,
+    )
 
 
     print()
-    print("=" * 70)
-
     print(
-        "Sampling 완료"
+        f"Engineered Rows    : "
+        f"{len(engineered_df):,}"
     )
 
     print(
-        f"전체 Train Row   : "
-        f"{total_rows_seen:,}"
+        f"Engineered Columns : "
+        f"{len(engineered_df.columns):,}"
     )
 
+
+    # ========================================================
+    # STEP 3
+    # 정상거래만 추출
+    #
+    # Isolation Forest는 정상 패턴만 학습한다.
+    #
+    # 단, Feature 계산은 이미 전체 거래를 기준으로
+    # 완료한 이후이다.
+    # ========================================================
+
+    print()
     print(
-        f"전체 정상거래    : "
+        "[3/4] 정상거래 추출"
+    )
+
+    target = pd.to_numeric(
+        raw_df[target_column],
+        errors="coerce",
+    )
+
+
+    if target.isna().any():
+
+        raise ValueError(
+            "Target 컬럼에 NaN 또는 "
+            "숫자로 변환할 수 없는 값이 존재합니다."
+        )
+
+
+    normal_mask = (
+        target == 0
+    )
+
+
+    normal_features = (
+        engineered_df
+        .loc[normal_mask]
+        .copy()
+    )
+
+
+    total_normal_seen = len(
+        normal_features
+    )
+
+
+    anomaly_count = int(
+        (target == 1).sum()
+    )
+
+
+    print(
+        f"정상거래 : "
         f"{total_normal_seen:,}"
     )
 
     print(
-        f"최종 학습 Sample : "
-        f"{len(reservoir):,}"
+        f"이상거래 : "
+        f"{anomaly_count:,}"
+    )
+
+
+    # ========================================================
+    # STEP 4
+    # 정상거래 Random Sampling
+    #
+    # Feature Engineering 이후 Sample하므로
+    # 거래 History는 이미 보존되어 있다.
+    # ========================================================
+
+    print()
+    print(
+        "[4/4] 정상거래 Random Sampling"
+    )
+
+
+    if (
+        sample_size is not None
+        and len(normal_features) > sample_size
+    ):
+
+        normal_features = (
+            normal_features
+            .sample(
+                n=sample_size,
+                random_state=random_state,
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+    else:
+
+        normal_features = (
+            normal_features
+            .reset_index(
+                drop=True
+            )
+        )
+
+
+    print()
+    print("=" * 70)
+    print("TRAINING DATA 준비 완료")
+    print("=" * 70)
+
+    print(
+        f"전체 거래       : "
+        f"{total_rows_seen:,}"
+    )
+
+    print(
+        f"전체 정상거래   : "
+        f"{total_normal_seen:,}"
+    )
+
+    print(
+        f"최종 학습 Sample: "
+        f"{len(normal_features):,}"
     )
 
     print("=" * 70)
 
 
     return (
-        reservoir,
+        normal_features,
         total_normal_seen,
+        total_rows_seen,
     )
 
 
 # ============================================================
-# 6. Isolation Forest 생성
+# 5. Isolation Forest 생성
 # ============================================================
 
 def build_isolation_forest(
 ) -> IsolationForest:
     """
-    config.py에 정의한 Parameter로
-    Isolation Forest 생성.
+    config.py에 정의된 Parameter를 사용하여
+    Isolation Forest를 생성한다.
     """
 
     model = IsolationForest(
@@ -462,7 +446,7 @@ def build_isolation_forest(
 
 
 # ============================================================
-# 7. 학습 Score Summary
+# 6. 학습 Score Summary
 # ============================================================
 
 def calculate_training_score_summary(
@@ -473,10 +457,11 @@ def calculate_training_score_summary(
     정상 Train Sample에 대한 score_samples 분포를 계산한다.
 
     Isolation Forest:
-        score가 낮을수록 이상치.
 
-    향후 evaluate.py에서 Validation Score와
-    비교하기 위한 참고용 Metadata.
+        score가 낮을수록 이상치에 가깝다.
+
+    Validation 단계에서 실제 이상거래 Score와
+    비교하여 Threshold를 결정할 때 참고한다.
     """
 
     scores = model.score_samples(
@@ -484,6 +469,7 @@ def calculate_training_score_summary(
     )
 
     summary = {
+
         "min": float(
             np.min(scores)
         ),
@@ -540,6 +526,72 @@ def calculate_training_score_summary(
 
 
 # ============================================================
+# 7. 학습 예측 결과 확인
+# ============================================================
+
+def calculate_training_prediction_summary(
+    model: IsolationForest,
+    X,
+) -> dict:
+    """
+    IsolationForest 기본 predict() 결과를 확인한다.
+
+    predict:
+        1  -> Normal
+        -1 -> Anomaly
+
+    주의:
+        이것은 최종 Threshold가 아니다.
+
+        최종 Threshold는 evaluate.py에서
+        실제 Validation Label을 기준으로 결정한다.
+    """
+
+    predictions = model.predict(
+        X
+    )
+
+
+    normal_count = int(
+        np.sum(
+            predictions == 1
+        )
+    )
+
+
+    anomaly_count = int(
+        np.sum(
+            predictions == -1
+        )
+    )
+
+
+    total = len(
+        predictions
+    )
+
+
+    return {
+
+        "normal_count":
+            normal_count,
+
+        "anomaly_count":
+            anomaly_count,
+
+        "normal_ratio":
+            normal_count / total
+            if total > 0
+            else 0.0,
+
+        "anomaly_ratio":
+            anomaly_count / total
+            if total > 0
+            else 0.0,
+    }
+
+
+# ============================================================
 # 8. Model Bundle 생성
 # ============================================================
 
@@ -551,13 +603,16 @@ def create_model_bundle(
     feature_names: list[str],
     training_sample_size: int,
     total_normal_seen: int,
+    total_rows_seen: int,
     training_score_summary: dict,
+    training_prediction_summary: dict,
     training_seconds: float,
 ) -> dict:
     """
     Model + Preprocessor + Metadata를 하나의 객체로 묶는다.
 
-    evaluate.py / inference.py에서 이 파일 하나만 Load하면 된다.
+    evaluate.py / inference.py에서는
+    해당 Joblib Bundle 하나만 Load하면 된다.
     """
 
     bundle = {
@@ -572,56 +627,55 @@ def create_model_bundle(
 
 
         # ====================================================
-        # Dataset 정보
+        # Dataset
         # ====================================================
 
-        "dataset_type": (
-            dataset_type
-        ),
+        "dataset_type":
+            dataset_type,
 
-        "target_column": (
+        "target_column":
             get_dataset_config(
                 dataset_type
-            )["target"]
-        ),
+            )["target"],
 
 
         # ====================================================
-        # Feature 정보
+        # Feature
         # ====================================================
 
-        "feature_names": (
-            feature_names
-        ),
+        "feature_names":
+            feature_names,
 
-        "n_features": len(
-            feature_names
-        ),
+        "n_features":
+            len(
+                feature_names
+            ),
 
 
         # ====================================================
-        # Training 정보
+        # Training
         # ====================================================
 
-        "training_sample_size": (
-            training_sample_size
-        ),
+        "training_sample_size":
+            training_sample_size,
 
-        "total_normal_seen": (
-            total_normal_seen
-        ),
+        "total_rows_seen":
+            total_rows_seen,
 
-        "isolation_forest_params": (
-            model.get_params()
-        ),
+        "total_normal_seen":
+            total_normal_seen,
 
-        "training_score_summary": (
-            training_score_summary
-        ),
+        "isolation_forest_params":
+            model.get_params(),
 
-        "training_seconds": (
-            training_seconds
-        ),
+        "training_score_summary":
+            training_score_summary,
+
+        "training_prediction_summary":
+            training_prediction_summary,
+
+        "training_seconds":
+            training_seconds,
 
         "trained_at": (
             datetime.now()
@@ -631,29 +685,22 @@ def create_model_bundle(
 
 
         # ====================================================
-        # 환경 정보
-        #
-        # 저장한 모델을 나중에 재현하거나
-        # 버전 문제를 추적하기 위해 저장
+        # 환경
         # ====================================================
 
         "environment": {
 
-            "python": (
-                platform.python_version()
-            ),
+            "python":
+                platform.python_version(),
 
-            "scikit_learn": (
-                sklearn.__version__
-            ),
+            "scikit_learn":
+                sklearn.__version__,
 
-            "pandas": (
-                pd.__version__
-            ),
+            "pandas":
+                pd.__version__,
 
-            "numpy": (
-                np.__version__
-            ),
+            "numpy":
+                np.__version__,
         },
     }
 
@@ -669,7 +716,7 @@ def save_model_bundle(
     model_path: Path,
 ) -> None:
     """
-    학습 결과 Bundle을 Joblib 파일로 저장.
+    Model Bundle을 Joblib 파일로 저장한다.
     """
 
     model_path.parent.mkdir(
@@ -677,11 +724,10 @@ def save_model_bundle(
         exist_ok=True,
     )
 
+
     joblib.dump(
         bundle,
         model_path,
-
-        # 적당한 압축
         compress=3,
     )
 
@@ -711,7 +757,7 @@ def print_training_summary(
     bundle: dict,
 ) -> None:
     """
-    학습 결과를 콘솔에 출력.
+    학습 결과 Summary 출력.
     """
 
     print()
@@ -719,19 +765,25 @@ def print_training_summary(
     print("TRAINING SUMMARY")
     print("=" * 70)
 
+
     print(
         f"Dataset        : "
         f"{bundle['dataset_type']}"
     )
 
     print(
-        f"Train Samples  : "
-        f"{bundle['training_sample_size']:,}"
+        f"Rows Seen      : "
+        f"{bundle['total_rows_seen']:,}"
     )
 
     print(
         f"Normal Seen    : "
         f"{bundle['total_normal_seen']:,}"
+    )
+
+    print(
+        f"Train Samples  : "
+        f"{bundle['training_sample_size']:,}"
     )
 
     print(
@@ -743,6 +795,11 @@ def print_training_summary(
         f"Training Time  : "
         f"{bundle['training_seconds']:.2f} sec"
     )
+
+
+    # ========================================================
+    # Isolation Forest 설정
+    # ========================================================
 
     print()
     print("[Isolation Forest]")
@@ -771,6 +828,11 @@ def print_training_summary(
         f"{params['n_jobs']}"
     )
 
+
+    # ========================================================
+    # Score
+    # ========================================================
+
     print()
     print("[Normal Training Score]")
 
@@ -787,6 +849,35 @@ def print_training_summary(
             f"{value:.6f}"
         )
 
+
+    # ========================================================
+    # Prediction
+    # ========================================================
+
+    print()
+    print("[Training Prediction]")
+
+    prediction_summary = bundle[
+        "training_prediction_summary"
+    ]
+
+    print(
+        "Normal : "
+        f"{prediction_summary['normal_count']:,} "
+        f"({prediction_summary['normal_ratio'] * 100:.2f}%)"
+    )
+
+    print(
+        "Anomaly: "
+        f"{prediction_summary['anomaly_count']:,} "
+        f"({prediction_summary['anomaly_ratio'] * 100:.2f}%)"
+    )
+
+
+    # ========================================================
+    # Environment
+    # ========================================================
+
     print()
     print("[Environment]")
 
@@ -800,6 +891,7 @@ def print_training_summary(
             f"{key:<15}: {value}"
         )
 
+
     print("=" * 70)
 
 
@@ -811,7 +903,8 @@ def train_isolation_forest(
     dataset_type: str,
     *,
     sample_size: int = TRAIN_SAMPLE_SIZE,
-    chunksize: int = 100_000,
+    max_files: int | None = None,
+    nrows_per_file: int | None = None,
 ) -> dict:
     """
     Isolation Forest 전체 학습 Pipeline.
@@ -821,17 +914,19 @@ def train_isolation_forest(
 
     Train CSV
         ↓
-    Chunk Loading
+    시간순 Load
+        ↓
+    전체 거래 Historical Feature Engineering
         ↓
     정상거래 추출
         ↓
-    Uniform Sampling
-        ↓
-    Feature Engineering
+    정상거래 Random Sampling
         ↓
     Preprocessor Fit
         ↓
     Isolation Forest Fit
+        ↓
+    Train Score 확인
         ↓
     Model Bundle 저장
     """
@@ -852,50 +947,75 @@ def train_isolation_forest(
 
     print()
     print("#" * 70)
+
     print(
         f"Isolation Forest Training : "
         f"{dataset_type}"
     )
+
     print("#" * 70)
 
 
     # ========================================================
     # STEP 1
-    # 정상거래 Sampling
+    # Historical Feature 포함 학습 데이터 준비
     # ========================================================
 
     print()
     print(
         "[STEP 1/5] "
-        "정상거래 Sampling"
+        "Training Data Preparation"
     )
 
-    normal_df, total_normal_seen = (
-        collect_normal_sample(
-            dataset_type=dataset_type,
-            sample_size=sample_size,
-            chunksize=chunksize,
-        )
+
+    (
+        normal_features,
+        total_normal_seen,
+        total_rows_seen,
+    ) = prepare_historical_training_sample(
+
+        dataset_type=dataset_type,
+
+        sample_size=sample_size,
+
+        random_state=RANDOM_STATE,
+
+        max_files=max_files,
+
+        nrows_per_file=nrows_per_file,
     )
 
 
     # ========================================================
     # STEP 2
-    # Feature Engineering + Preprocessor Fit
+    # Preprocessor Fit
+    #
+    # Feature Engineering은 이미 완료되었으므로
+    # 여기서는 다시 engineer_features()를 호출하지 않는다.
     # ========================================================
 
     print()
     print(
         "[STEP 2/5] "
-        "Feature Engineering"
+        "Preprocessor Fit"
     )
 
 
-    X_train, preprocessor = (
-        fit_transform_features(
-            normal_df,
-            dataset_type,
+    preprocessor = build_preprocessor(
+        dataset_type
+    )
+
+
+    X_train = (
+        preprocessor
+        .fit_transform(
+            normal_features
         )
+    )
+
+
+    X_train = X_train.astype(
+        np.float32
     )
 
 
@@ -903,7 +1023,7 @@ def train_isolation_forest(
     # Sparse Matrix 처리
     #
     # IsolationForest.fit()에서는
-    # CSC Sparse Matrix를 효율적으로 사용할 수 있다.
+    # CSC Sparse Matrix 사용
     # ========================================================
 
     if sparse.issparse(
@@ -920,11 +1040,9 @@ def train_isolation_forest(
 
     else:
 
-        X_train = (
-            np.asarray(
-                X_train,
-                dtype=np.float32,
-            )
+        X_train = np.asarray(
+            X_train,
+            dtype=np.float32,
         )
 
 
@@ -935,6 +1053,7 @@ def train_isolation_forest(
     )
 
 
+    print()
     print(
         f"Train Matrix Shape : "
         f"{X_train.shape}"
@@ -968,9 +1087,7 @@ def train_isolation_forest(
     )
 
 
-    model = (
-        build_isolation_forest()
-    )
+    model = build_isolation_forest()
 
 
     print(
@@ -1017,10 +1134,10 @@ def train_isolation_forest(
 
 
     # ========================================================
-    # 정상 Train Score 확인
+    # Train Score
     # ========================================================
 
-    score_summary = (
+    training_score_summary = (
         calculate_training_score_summary(
             model,
             X_train,
@@ -1029,8 +1146,20 @@ def train_isolation_forest(
 
 
     # ========================================================
+    # 기본 Prediction
+    # ========================================================
+
+    training_prediction_summary = (
+        calculate_training_prediction_summary(
+            model,
+            X_train,
+        )
+    )
+
+
+    # ========================================================
     # STEP 5
-    # 저장
+    # Model Bundle 저장
     # ========================================================
 
     print()
@@ -1040,19 +1169,39 @@ def train_isolation_forest(
     )
 
 
-    bundle = (
-        create_model_bundle(
-            dataset_type=dataset_type,
-            model=model,
-            preprocessor=preprocessor,
-            feature_names=feature_names,
-            training_sample_size=len(
-                normal_df
-            ),
-            total_normal_seen=total_normal_seen,
-            training_score_summary=score_summary,
-            training_seconds=training_seconds,
-        )
+    bundle = create_model_bundle(
+
+        dataset_type=dataset_type,
+
+        model=model,
+
+        preprocessor=preprocessor,
+
+        feature_names=feature_names,
+
+        training_sample_size=len(
+            normal_features
+        ),
+
+        total_normal_seen=(
+            total_normal_seen
+        ),
+
+        total_rows_seen=(
+            total_rows_seen
+        ),
+
+        training_score_summary=(
+            training_score_summary
+        ),
+
+        training_prediction_summary=(
+            training_prediction_summary
+        ),
+
+        training_seconds=(
+            training_seconds
+        ),
     )
 
 
@@ -1080,10 +1229,10 @@ def load_model_bundle(
     dataset_type: str,
 ) -> dict:
     """
-    저장한 Model Bundle Load.
+    저장된 Model Bundle Load.
 
     evaluate.py / inference.py에서도
-    동일한 방식으로 사용 예정.
+    동일한 방식으로 사용한다.
     """
 
     dataset_config = (
@@ -1144,21 +1293,37 @@ if __name__ == "__main__":
 
     # ========================================================
     # 현재는 전자금융공동망부터 학습
+    #
+    # 처음에는 전체 수백만 건을 사용하지 않는다.
+    #
+    # 1개 CSV에서 최대 100,000행으로
+    # 전체 Pipeline을 먼저 검증한다.
+    #
+    # 정상적으로 학습된 후:
+    #
+    # max_files=None
+    # nrows_per_file=None
+    #
+    # 로 변경하면 전체 Train 데이터 사용 가능.
     # ========================================================
 
     bundle = train_isolation_forest(
+
         dataset_type="electronic",
 
-        # Baseline
+        # 정상거래 Sample 수
         sample_size=TRAIN_SAMPLE_SIZE,
 
-        # CSV는 10만 행씩 읽기
-        chunksize=100_000,
+        # 테스트 단계
+        max_files=None,
+
+        # 파일당 최대 10만 행
+        nrows_per_file=None,
     )
 
 
     # ========================================================
-    # 저장 파일이 정상 Load 되는지 마지막 검증
+    # 저장 파일 Load 검증
     # ========================================================
 
     loaded_bundle = (
