@@ -33,6 +33,14 @@ try:
         find_current_transaction_index,
     )
 
+    from .rule_engine import (
+        FraudRuleEngine,
+    )
+
+    from .risk_score import (
+        calculate_risk_score,
+    )
+
 except ImportError:
 
     from config import (
@@ -53,6 +61,14 @@ except ImportError:
         find_current_transaction_index,
     )
 
+    from rule_engine import (
+        FraudRuleEngine,
+    )
+
+    from risk_score import (
+        calculate_risk_score,
+    )
+
 
 # ============================================================
 # FastAPI
@@ -60,8 +76,11 @@ except ImportError:
 
 app = FastAPI(
     title="MOVI Fraud Detection API",
-    description="MOVI 이상거래 탐지 API",
-    version="0.2.0",
+    description=(
+        "Isolation Forest + Rule Engine 기반 "
+        "MOVI 이상거래 탐지 API"
+    ),
+    version="0.4.0",
 )
 
 
@@ -85,8 +104,8 @@ THRESHOLD_PATH = (
 # ============================================================
 # Model Load
 #
-# 서버 실행 시 모델을 한 번만 로드한다.
-# 요청마다 joblib.load()를 수행하지 않는다.
+# 서버 시작 시 한 번만 Load.
+# 요청마다 다시 로드하지 않는다.
 # ============================================================
 
 if not MODEL_PATH.exists():
@@ -142,6 +161,15 @@ threshold = float(
 
 
 # ============================================================
+# Rule Engine
+# ============================================================
+
+rule_engine = (
+    FraudRuleEngine()
+)
+
+
+# ============================================================
 # Root
 # ============================================================
 
@@ -155,6 +183,14 @@ def root():
         ),
 
         "status": "running",
+
+        "version": "0.4.0",
+
+        "components": [
+            "isolation_forest",
+            "rule_engine",
+            "risk_score",
+        ],
     }
 
 
@@ -181,6 +217,12 @@ def health_check():
             "isolation_forest"
         ),
 
+        "rule_engine_loaded": (
+            rule_engine is not None
+        ),
+
+        "risk_score_enabled": True,
+
         "threshold": round(
             threshold,
             6,
@@ -203,13 +245,11 @@ def detect_fraud(
     try:
 
         # ====================================================
-        # 1. Request → AIHub 형식 DataFrame
+        # 1. API Request
+        #       ↓
+        # AIHub 스타일 DataFrame
         #
-        # history
-        #   +
-        # current_transaction
-        #
-        # 전체를 DataFrame으로 변환한다.
+        # history + current transaction
         # ====================================================
 
         df = (
@@ -238,10 +278,7 @@ def detect_fraud(
 
 
         # ====================================================
-        # 3. 현재 거래 위치 확인
-        #
-        # Feature Engineering 전에
-        # 현재 거래 위치를 확보한다.
+        # 3. 현재 거래 Index 확인
         # ====================================================
 
         current_index = (
@@ -280,13 +317,9 @@ def detect_fraud(
 
 
         # ====================================================
-        # 4. Feature Engineering용 DataFrame 생성
+        # 4. Feature Engineering 입력 생성
         #
-        # 아래 컬럼은 API 내부 추적용이므로
-        # AIHub Feature Engineering에서는 제거한다.
-        #
-        # _transaction_id
-        # _transaction_datetime
+        # API 내부 추적용 Column 제거
         # ====================================================
 
         feature_input_df = (
@@ -301,43 +334,12 @@ def detect_fraud(
 
 
         # ====================================================
-        # Debug - Feature Input
-        # ====================================================
-
-        print()
-        print("=" * 70)
-        print("[FEATURE INPUT]")
-        print("=" * 70)
-
-        print(
-            feature_input_df.to_string(
-                index=False
-            )
-        )
-
-
-        # ====================================================
         # 5. Feature Engineering
         #
-        # 중요:
+        # history + current 전체를 함께 넣는다.
         #
-        # 현재 거래만 넣는 것이 아니라
-        #
-        # history + current
-        #
-        # 전체를 함께 넣어야 한다.
-        #
-        # 그래야:
-        #
-        # amount_ratio
-        # amount_zscore
-        # new_recipient
-        # unusual_medium
-        # historical_transaction_count
-        # same_day_transaction_count
-        # same_time_bucket_count
-        #
-        # 등이 정상 계산된다.
+        # Historical Feature가 현재 거래의
+        # 이전 거래 기준으로 계산되어야 하기 때문.
         # ====================================================
 
         engineered_df = (
@@ -370,27 +372,9 @@ def detect_fraud(
             )
         )
 
-        print()
-
-        print(
-            "[ENGINEERED COLUMNS]"
-        )
-
-        print(
-            engineered_df
-            .columns
-            .tolist()
-        )
-
 
         # ====================================================
-        # 6. 현재 거래 Feature만 추출
-        #
-        # transaction_mapper에서 시간순 정렬 후
-        # current_index를 찾았고,
-        #
-        # engineer_electronic_features가 Row 개수와
-        # Row 순서를 유지한다는 전제.
+        # 6. 현재 거래 Feature
         # ====================================================
 
         if (
@@ -402,10 +386,13 @@ def detect_fraud(
         ):
 
             raise ValueError(
+
                 "현재 거래 Index가 "
                 "Feature Engineering 결과 범위를 "
                 "벗어났습니다. "
+
                 f"current_index={current_index}, "
+
                 f"rows={len(engineered_df)}"
             )
 
@@ -420,9 +407,86 @@ def detect_fraud(
 
 
         # ====================================================
-        # 7. 저장된 Preprocessor 적용
+        # 7. Rule Engine
         #
-        # 추론이므로 절대 다시 fit하지 않는다.
+        # Preprocessor 적용 전 원본 Feature 사용
+        # ====================================================
+
+        current_feature_dict = (
+            current_features
+            .iloc[0]
+            .to_dict()
+        )
+
+
+        rule_result = (
+            rule_engine.evaluate(
+                current_feature_dict
+            )
+        )
+
+
+        rule_score = float(
+            rule_result[
+                "rule_score"
+            ]
+        )
+
+
+        triggered_rules = (
+            rule_result[
+                "triggered_rules"
+            ]
+        )
+
+
+        # ====================================================
+        # Debug - Rule Engine
+        # ====================================================
+
+        print()
+        print("=" * 70)
+        print("[RULE ENGINE]")
+        print("=" * 70)
+
+        print(
+            "rule_score:",
+            rule_score,
+        )
+
+        print(
+            "triggered_rules:",
+            triggered_rules,
+        )
+
+
+        for detail in (
+            rule_result[
+                "rule_details"
+            ]
+        ):
+
+            if detail[
+                "triggered"
+            ]:
+
+                print(
+                    "-",
+                    detail[
+                        "name"
+                    ],
+                    ":",
+                    detail[
+                        "reason"
+                    ],
+                    f"(+{detail['score']})",
+                )
+
+
+        # ====================================================
+        # 8. 저장된 Preprocessor
+        #
+        # 추론에서는 반드시 transform만 사용.
         #
         # fit_transform X
         # transform O
@@ -436,7 +500,7 @@ def detect_fraud(
 
 
         # ====================================================
-        # 8. float32 통일
+        # 9. float32 통일
         # ====================================================
 
         X = X.astype(
@@ -458,7 +522,7 @@ def detect_fraud(
 
 
         # ====================================================
-        # 9. Isolation Forest
+        # 10. Isolation Forest
         # ====================================================
 
         raw_score = float(
@@ -471,17 +535,15 @@ def detect_fraud(
 
 
         # ====================================================
-        # 10. Anomaly Score
+        # 11. Anomaly Score
         #
-        # sklearn Isolation Forest
-        #
-        # score_samples:
-        #     작을수록 이상
+        # sklearn score_samples:
+        # 작은 값 → 이상
         #
         # MOVI:
-        #     anomaly_score가 클수록 위험
+        # 큰 값 → 위험
         #
-        # 따라서 부호를 반전한다.
+        # 따라서 부호 반전
         # ====================================================
 
         anomaly_score = (
@@ -490,7 +552,7 @@ def detect_fraud(
 
 
         # ====================================================
-        # 11. Threshold
+        # 12. Isolation Forest 판단
         # ====================================================
 
         is_anomaly = (
@@ -501,41 +563,60 @@ def detect_fraud(
 
 
         # ====================================================
-        # 12. 임시 Risk Level
+        # 13. Final Risk Score
         #
-        # 현재는 Isolation Forest 결과만 사용.
+        # anomaly_score
+        #     ↓
+        # model_risk_score 0~100
         #
-        # 다음 단계:
+        # +
         #
-        # Isolation Forest
-        #       +
-        # Rule Engine
-        #       ↓
-        # Final Risk Score
+        # rule_score 0~100
         #
-        # 구현 후 교체한다.
+        #     ↓
+        #
+        # final_risk_score 0~100
         # ====================================================
 
-        if is_anomaly:
+        risk_result = (
+            calculate_risk_score(
 
-            risk_level = (
-                "HIGH"
+                anomaly_score=(
+                    anomaly_score
+                ),
+
+                rule_score=(
+                    rule_score
+                ),
             )
+        )
 
-        else:
 
-            risk_level = (
-                "LOW"
-            )
+        model_risk_score = (
+            risk_result
+            .model_risk_score
+        )
+
+
+        final_risk_score = (
+            risk_result
+            .final_risk_score
+        )
+
+
+        risk_level = (
+            risk_result
+            .risk_level
+        )
 
 
         # ====================================================
-        # Debug - Score
+        # Debug - Isolation Forest
         # ====================================================
 
         print()
         print("=" * 70)
-        print("[FDS RESULT]")
+        print("[ISOLATION FOREST]")
         print("=" * 70)
 
         print(
@@ -565,7 +646,37 @@ def detect_fraud(
 
 
         # ====================================================
-        # 13. Response
+        # Debug - Final Risk
+        # ====================================================
+
+        print()
+        print("=" * 70)
+        print("[FINAL RISK]")
+        print("=" * 70)
+
+        print(
+            "model_risk_score:",
+            model_risk_score,
+        )
+
+        print(
+            "rule_score:",
+            rule_score,
+        )
+
+        print(
+            "final_risk_score:",
+            final_risk_score,
+        )
+
+        print(
+            "risk_level:",
+            risk_level,
+        )
+
+
+        # ====================================================
+        # 14. API Response
         # ====================================================
 
         return FraudDetectionResponse(
@@ -588,18 +699,31 @@ def detect_fraud(
                 is_anomaly
             ),
 
+            model=(
+                "isolation_forest"
+            ),
+
+            rule_score=round(
+                rule_score,
+                2,
+            ),
+
+            final_risk_score=(
+                final_risk_score
+            ),
+
             risk_level=(
                 risk_level
             ),
 
-            model=(
-                "isolation_forest"
+            triggered_rules=(
+                triggered_rules
             ),
         )
 
 
     # ========================================================
-    # 잘못된 거래 입력 / Mapping 오류
+    # Bad Request
     # ========================================================
 
     except ValueError as error:
@@ -610,6 +734,7 @@ def detect_fraud(
             str(error),
         )
 
+
         raise HTTPException(
             status_code=400,
             detail=str(error),
@@ -617,7 +742,7 @@ def detect_fraud(
 
 
     # ========================================================
-    # 기타 내부 오류
+    # Internal Error
     # ========================================================
 
     except Exception as error:
@@ -629,10 +754,14 @@ def detect_fraud(
             str(error),
         )
 
+
         raise HTTPException(
+
             status_code=500,
+
             detail=(
                 f"{type(error).__name__}: "
                 f"{str(error)}"
             ),
+
         ) from error
