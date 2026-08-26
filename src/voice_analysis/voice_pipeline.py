@@ -21,55 +21,61 @@ class VoicePipeline:
     """
     MOVI 음성 요구사항 분석 Pipeline.
 
-    책임
-    ----
-    Python:
-        - Wake Word
-        - Intent 분석
-        - Entity 추출
-        - Follow-up Entity 분석
-        - Backend 전송
+    Python 담당
+    -----------
+    1. Wake Word 감지
+    2. Intent 분석
+    3. Entity 추출
+    4. Backend Request 생성
+    5. Backend Response 처리
+    6. Follow-up Entity 추출
+    7. Multi-turn Context 유지
 
-    Backend:
-        - 필수값 검증
-        - 빈 값 판단
-        - 다음 질문 결정
-        - 실제 금융 기능 실행
+    Backend 담당
+    --------------
+    1. 필수 Entity 판단
+    2. 빈 값 판단
+    3. 다음 요청 Field 결정
+    4. 실제 금융 기능 처리
     """
 
     def __init__(self):
 
-        self.wake_word_detector = (
-            WakeWordDetector()
-        )
+        self.wake_word_detector = WakeWordDetector()
 
-        self.requirement_analyzer = (
-            RequirementAnalyzer()
-        )
+        self.requirement_analyzer = RequirementAnalyzer()
 
-        self.follow_up_parser = (
-            FollowUpEntityParser()
-        )
+        self.follow_up_parser = FollowUpEntityParser()
 
-        # 하나의 Multi-turn 요청에서 유지
+        # ====================================================
+        # 현재 진행 중인 요청 상태
+        # ====================================================
+
         self.request_id: Optional[str] = None
 
         self.current_intent: Optional[str] = None
 
         self.current_entities: dict[str, Any] = {}
 
-        # Backend가 다음에 요구한 Field
+        # Backend가 추가로 요구한 Entity
         self.requested_field: Optional[str] = None
 
 
     # ============================================================
-    # 최초 사용자 명령
+    # 최초 명령 처리
     # ============================================================
 
     def process_text(
         self,
         text: str,
     ) -> dict[str, Any]:
+        """
+        최초 사용자 음성 명령 처리.
+
+        Example
+        -------
+        "모비야 김민수한테 오만원 보내줘"
+        """
 
         if not text or not text.strip():
 
@@ -80,13 +86,11 @@ class VoicePipeline:
 
 
         # ========================================================
-        # 1. Wake Word
+        # 1. Wake Word 감지
         # ========================================================
 
-        wake_result = (
-            self.wake_word_detector.detect(
-                text
-            )
+        wake_result = self.wake_word_detector.detect(
+            text
         )
 
 
@@ -102,6 +106,7 @@ class VoicePipeline:
         command = wake_result.command
 
 
+        # "모비야"만 말한 경우
         if not command:
 
             return {
@@ -111,26 +116,22 @@ class VoicePipeline:
 
 
         # ========================================================
-        # 2. 새로운 Request 시작
+        # 2. 새 요청 시작
         # ========================================================
 
         self.reset()
 
-        self.request_id = (
-            create_request_id()
-        )
+        self.request_id = create_request_id()
 
 
         # ========================================================
-        # 3. Requirement Analyzer
+        # 3. Requirement 분석
         # ========================================================
 
         try:
 
-            analysis = (
-                self.requirement_analyzer.analyze(
-                    command
-                )
+            analysis = self.requirement_analyzer.analyze(
+                command
             )
 
         except Exception as error:
@@ -146,17 +147,24 @@ class VoicePipeline:
         # 4. Intent / Entity 저장
         # ========================================================
 
-        self.current_intent = (
-            analysis.intent
-        )
+        self.current_intent = analysis.intent
 
-        self.current_entities = (
-            analysis.entities.model_dump()
-        )
+
+        try:
+
+            self.current_entities = (
+                analysis.entities.model_dump()
+            )
+
+        except AttributeError:
+
+            self.current_entities = dict(
+                analysis.entities
+            )
 
 
         # ========================================================
-        # unknown
+        # 5. 지원하지 않는 Intent
         # ========================================================
 
         if self.current_intent == "unknown":
@@ -169,7 +177,7 @@ class VoicePipeline:
 
 
         # ========================================================
-        # 5. Backend로 무조건 전달
+        # 6. Backend 전송
         # ========================================================
 
         return self._send_to_backend(
@@ -186,21 +194,16 @@ class VoicePipeline:
         text: str,
     ) -> dict[str, Any]:
         """
-        Backend가 requested_field를 반환한 이후
-        사용자가 추가로 말한 내용을 처리한다.
+        Backend에서 requested_field가 반환된 이후
+        사용자의 추가 음성을 처리한다.
 
         Example
         -------
-        Backend:
-            requested_field = recipient_bank
+        requested_field:
+            recipient_bank
 
-        사용자:
+        user:
             "국민은행이야"
-
-        Python:
-            recipient_bank = 국민은행
-
-        이후 동일 request_id로 Backend에 재전송한다.
         """
 
         if not text or not text.strip():
@@ -211,6 +214,7 @@ class VoicePipeline:
             )
 
 
+        # 진행 중인 요청 없음
         if self.request_id is None:
 
             return self._error_response(
@@ -220,18 +224,16 @@ class VoicePipeline:
 
 
         # ========================================================
-        # Backend가 특정 Field를 요청한 경우
+        # Backend가 특정 Field를 요구한 경우
         # ========================================================
 
         if self.requested_field:
 
             try:
 
-                parsed = (
-                    self.follow_up_parser.parse(
-                        field_name=self.requested_field,
-                        user_text=text,
-                    )
+                parsed = self.follow_up_parser.parse(
+                    field_name=self.requested_field,
+                    user_text=text,
                 )
 
             except Exception as error:
@@ -255,14 +257,10 @@ class VoicePipeline:
 
 
         # ========================================================
-        # requested_field가 없을 경우
+        # Backend 재전송
         #
-        # Backend가 confirm / deny 등의 응답을 기다리는
-        # 구조로 확장할 수 있다.
-        #
-        # 현재는 그대로 transcript만 다시 전달한다.
+        # 같은 request_id 유지
         # ========================================================
-
 
         return self._send_to_backend(
             transcript=text
@@ -296,42 +294,53 @@ class VoicePipeline:
 
 
         # ========================================================
-        # Request JSON 생성
+        # 1. Backend Request 생성
         # ========================================================
 
-        backend_request = (
-            build_backend_request(
-                request_id=self.request_id,
-                transcript=transcript,
-                intent=self.current_intent,
-                entities=self.current_entities,
-            )
+        backend_request = build_backend_request(
+
+            request_id=self.request_id,
+
+            transcript=transcript,
+
+            intent=self.current_intent,
+
+            entities=self.current_entities,
         )
 
 
         # ========================================================
-        # Backend POST
+        # 2. Backend POST
         # ========================================================
 
         try:
 
-            backend_response = (
-                send_voice_command(
-                    backend_request
-                )
+            backend_response = send_voice_command(
+                backend_request
             )
 
         except BackendClientError as error:
 
-            return self._error_response(
-                code="BACKEND_REQUEST_FAILED",
-                message="Backend 서버 요청에 실패했습니다.",
-                detail=str(error),
-            )
+            return {
+                "status": "backend_unavailable",
+
+                "request_id": self.request_id,
+
+                "intent": self.current_intent,
+
+                "entities": self.current_entities.copy(),
+
+                "backend_request": backend_request,
+
+                "error": {
+                    "code": "BACKEND_REQUEST_FAILED",
+                    "message": str(error),
+                },
+            }
 
 
         # ========================================================
-        # Backend가 요구하는 다음 Field 저장
+        # 3. Backend requested_field 저장
         # ========================================================
 
         self.requested_field = (
@@ -342,14 +351,18 @@ class VoicePipeline:
 
 
         # ========================================================
-        # Backend 응답 반환
+        # 4. Backend 완료 시 Context 종료 여부
         # ========================================================
 
-        return {
-            "status": backend_response.get(
-                "status",
-                "success",
-            ),
+        backend_status = backend_response.get(
+            "status",
+            "success",
+        )
+
+
+        result = {
+
+            "status": backend_status,
 
             "request_id": self.request_id,
 
@@ -363,10 +376,23 @@ class VoicePipeline:
                 "message"
             ),
 
+            "data": backend_response.get(
+                "data"
+            ),
+
             "backend_request": backend_request,
 
             "backend_response": backend_response,
         }
+
+
+        # completed면 요청 종료
+        if backend_status == "completed":
+
+            self.reset()
+
+
+        return result
 
 
     # ============================================================
@@ -378,15 +404,23 @@ class VoicePipeline:
     ) -> dict[str, Any]:
 
         return {
+
             "request_id": self.request_id,
+
             "intent": self.current_intent,
-            "entities": self.current_entities.copy(),
-            "requested_field": self.requested_field,
+
+            "entities": (
+                self.current_entities.copy()
+            ),
+
+            "requested_field": (
+                self.requested_field
+            ),
         }
 
 
     # ============================================================
-    # Error
+    # Error Response
     # ============================================================
 
     def _error_response(
@@ -397,6 +431,7 @@ class VoicePipeline:
     ) -> dict[str, Any]:
 
         response = {
+
             "status": "error",
 
             "error": {
@@ -408,11 +443,9 @@ class VoicePipeline:
 
         if detail:
 
-            response[
-                "error"
-            ][
-                "detail"
-            ] = detail
+            response["error"]["detail"] = (
+                detail
+            )
 
 
         return response
