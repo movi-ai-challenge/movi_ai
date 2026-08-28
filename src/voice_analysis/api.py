@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Optional
 
@@ -91,6 +92,24 @@ def root():
 
 @app.get("/health")
 def health():
+    """
+    OPENAI_API_KEY 가 없으면 503 을 반환한다.
+
+    클라이언트를 지연 생성하도록 바꾸면서 키가 없어도 서버가
+    뜨게 됐다. 그대로 두면 배포는 성공했는데 모든 음성 요청이
+    실패하는 상태가 된다. 배포 스크립트가 healthcheck 로
+    롤백을 판단하므로 여기서 잡는다.
+    """
+
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "unavailable",
+                "service": "voice-analysis",
+                "reason": "OPENAI_API_KEY 가 설정되지 않았습니다.",
+            },
+        )
 
     return {
 
