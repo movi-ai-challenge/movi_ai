@@ -1,0 +1,202 @@
+name: Deploy AI to AWS EC2
+
+on:
+  push:
+    branches:
+      # AI 저장소에는 develop 브랜치가 없다(main 단독).
+      # 나중에 백엔드처럼 develop 를 쓰게 되면 그대로 동작한다.
+      - main
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-ai-develop
+  cancel-in-progress: false
+
+env:
+  DOCKER_IMAGE_NAME: ${{ secrets.AI_DOCKER_IMAGE_NAME }}
+  EC2_HOST: ${{ secrets.EC2_HOST }}
+  EC2_SSH_USER: ubuntu
+  EC2_DEPLOY_PATH: /home/ubuntu/movi-ai
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        env:
+          # 외부 백엔드/OpenAI 를 호출하는 통합 테스트는 CI 에서 제외한다.
+          PYTHONUTF8: "1"
+        run: pytest -q -k "not backend_flow"
+
+  build-and-push-docker:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCKER_IMAGE_NAME }}:latest
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-to-ec2:
+    needs: build-and-push-docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Encode runtime environment file
+        env:
+          AI_ENV_FILE: ${{ secrets.AI_ENV_FILE }}
+        run: |
+          if [ -z "$AI_ENV_FILE" ]; then
+            echo "AI_ENV_FILE 시크릿이 비어 있습니다." >&2
+            exit 1
+          fi
+          echo "ENV_B64=$(printf '%s' "$AI_ENV_FILE" | base64 -w0)" >> "$GITHUB_ENV"
+
+      - name: Encode Google service account (optional)
+        env:
+          GCP_SA_JSON: ${{ secrets.AI_GCP_SERVICE_ACCOUNT }}
+        run: |
+          # 없으면 빈 값으로 두고 STT/TTS 없이 기동한다.
+          echo "GCP_B64=$(printf '%s' "$GCP_SA_JSON" | base64 -w0)" >> "$GITHUB_ENV"
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
+          DOCKER_IMAGE_NAME: ${{ env.DOCKER_IMAGE_NAME }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          EC2_DEPLOY_PATH: ${{ env.EC2_DEPLOY_PATH }}
+          ENV_B64: ${{ env.ENV_B64 }}
+          GCP_B64: ${{ env.GCP_B64 }}
+          GIT_COMMIT_SHA: ${{ github.sha }}
+        with:
+          host: ${{ env.EC2_HOST }}
+          username: ${{ env.EC2_SSH_USER }}
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          envs: DOCKER_HUB_TOKEN,DOCKER_IMAGE_NAME,DOCKER_USERNAME,EC2_DEPLOY_PATH,ENV_B64,GCP_B64,GIT_COMMIT_SHA
+          command_timeout: 10m
+          script: |
+            set -eu
+
+            IMAGE_REFERENCE="${DOCKER_IMAGE_NAME}:${GIT_COMMIT_SHA}"
+            SECRETS_DIRECTORY="${EC2_DEPLOY_PATH}/secrets"
+            ENV_PATH="${EC2_DEPLOY_PATH}/.env"
+
+            sudo mkdir -p "$SECRETS_DIRECTORY"
+
+            # .env : uid 10001(컨테이너 movi)만 읽을 수 있게
+            printf '%s' "$ENV_B64" | base64 -d | sudo tee "$ENV_PATH" > /dev/null
+            sudo chown root:root "$ENV_PATH"
+            sudo chmod 600 "$ENV_PATH"
+            sudo test -s "$ENV_PATH"
+
+            # Google 서비스 계정 (선택)
+            if [ -n "$GCP_B64" ]; then
+              printf '%s' "$GCP_B64" | base64 -d \
+                | sudo tee "${SECRETS_DIRECTORY}/gcp.json" > /dev/null
+              sudo chown 10001:10001 "${SECRETS_DIRECTORY}/gcp.json"
+              sudo chmod 400 "${SECRETS_DIRECTORY}/gcp.json"
+            fi
+            sudo chown 10001:10001 "$SECRETS_DIRECTORY"
+            sudo chmod 500 "$SECRETS_DIRECTORY"
+
+            echo "$DOCKER_HUB_TOKEN" | sudo docker login \
+              --username "$DOCKER_USERNAME" --password-stdin
+            sudo docker pull "$IMAGE_REFERENCE"
+
+            # 백엔드 컨테이너와 같은 네트워크에 붙는다.
+            # 백엔드는 http://movi-ai-fds:8000 / http://movi-ai-voice:8001 로 호출한다.
+            # (백엔드 컨테이너도 --network movi-net 으로 실행되어야 한다)
+            sudo docker network create movi-net 2>/dev/null || true
+
+            # ---- 컨테이너 2개를 각각 교체한다 ----
+            deploy_one() {
+              NAME="$1"; APP_MODULE="$2"; PORT="$3"
+              BACKUP="${NAME}-rollback"
+
+              sudo docker rm --force "$BACKUP" 2>/dev/null || true
+
+              if sudo docker container inspect "$NAME" >/dev/null 2>&1; then
+                sudo docker stop "$NAME"
+                sudo docker rename "$NAME" "$BACKUP"
+              fi
+
+              if ! sudo docker run \
+                --name "$NAME" \
+                --detach \
+                --restart unless-stopped \
+                --network movi-net \
+                --publish "127.0.0.1:${PORT}:${PORT}" \
+                --env-file "$ENV_PATH" \
+                --env TZ=Asia/Seoul \
+                --env APP_MODULE="$APP_MODULE" \
+                --env PORT="$PORT" \
+                --volume "${SECRETS_DIRECTORY}:/app/secrets:ro" \
+                "$IMAGE_REFERENCE"; then
+                restore "$NAME" "$BACKUP"
+                return 1
+              fi
+
+              attempt=1
+              while [ "$attempt" -le 30 ]; do
+                status="$(sudo docker inspect \
+                  --format='{{.State.Health.Status}}' "$NAME" 2>/dev/null || true)"
+                [ "$status" = "healthy" ] && return 0
+                [ "$status" = "unhealthy" ] && break
+                sleep 5
+                attempt=$((attempt + 1))
+              done
+
+              sudo docker logs --tail 100 "$NAME" || true
+              restore "$NAME" "$BACKUP"
+              return 1
+            }
+
+            restore() {
+              sudo docker rm --force "$1" 2>/dev/null || true
+              if sudo docker container inspect "$2" >/dev/null 2>&1; then
+                sudo docker rename "$2" "$1"
+                sudo docker start "$1"
+              fi
+            }
+
+            deploy_one movi-ai-fds   src.fraud_detection.api:app 8000
+            deploy_one movi-ai-voice src.voice_analysis.api:app  8001
+
+            echo "Deployment completed: $IMAGE_REFERENCE"

@@ -1,0 +1,91 @@
+# ============================================================
+# MOVI AI - EC2 운영용
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d
+#
+# 백엔드(movi_backend)와 같은 EC2 에 올라간다.
+# 백엔드도 컨테이너이므로 localhost 로는 AI 에 닿지 않는다.
+# 공용 네트워크 movi-net 에 함께 붙여 컨테이너 이름으로 호출한다.
+#   FDS_API_BASE_URL=http://movi-ai-fds:8000
+#   VOICE_API_BASE_URL=http://movi-ai-voice:8001
+#
+# 127.0.0.1 publish 는 EC2 에 SSH 로 들어가 확인할 때만 쓴다.
+#
+# 포트는 127.0.0.1 에만 바인딩한다.
+# 외부에 직접 노출할 이유가 없고, 노출하면 인증 없는 내부 API 가
+# 인터넷에 열린다.
+# ============================================================
+
+services:
+  movi-ai-fds:
+    image: ${DOCKER_IMAGE_NAME:-movi-ai}:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: movi-ai-fds
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      TZ: Asia/Seoul
+      APP_MODULE: src.fraud_detection.api:app
+      PORT: "8000"
+      UVICORN_WORKERS: "${FDS_WORKERS:-1}"
+      FDS_MODEL_PATH: models/electronic/isolation_forest.joblib
+      FDS_THRESHOLD: "${FDS_THRESHOLD:?FDS_THRESHOLD 를 .env 에 설정하세요}"
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
+      BACKEND_TIMEOUT: "${BACKEND_TIMEOUT:-5}"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=4).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - movi-net
+
+  movi-ai-voice:
+    image: ${DOCKER_IMAGE_NAME:-movi-ai}:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: movi-ai-voice
+    ports:
+      - "127.0.0.1:8001:8001"
+    environment:
+      TZ: Asia/Seoul
+      APP_MODULE: src.voice_analysis.api:app
+      PORT: "8001"
+      UVICORN_WORKERS: "${VOICE_WORKERS:-1}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:?OPENAI_API_KEY 를 .env 에 설정하세요}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5-nano}"
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
+      VOICE_COMMAND_ENDPOINT: ${VOICE_COMMAND_ENDPOINT:-/api/v1/voice/command}
+      BACKEND_TIMEOUT: "${BACKEND_TIMEOUT:-5}"
+      VOICE_DEBUG: "${VOICE_DEBUG:-false}"
+      # Google STT/TTS 를 쓰려면 아래 두 개가 필요하다.
+      # 서비스 계정 JSON 은 볼륨으로 넣고 경로를 컨테이너 기준으로 준다.
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      GOOGLE_STT_LOCATION: ${GOOGLE_STT_LOCATION:-us}
+      GOOGLE_STT_MODEL: ${GOOGLE_STT_MODEL:-chirp_3}
+    volumes:
+      # 서비스 계정 JSON 을 secrets/ 에 두면 /app/secrets 로 들어간다.
+      # 비어 있어도 컨테이너는 정상 기동한다 (STT/TTS 만 비활성).
+      - ./secrets:/app/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=4).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - movi-net
+
+networks:
+  # 백엔드 컨테이너와 공유한다. 없으면 먼저 만든다.
+  #   docker network create movi-net
+  movi-net:
+    name: movi-net
+    external: true
