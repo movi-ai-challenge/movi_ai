@@ -5,6 +5,7 @@ from google.cloud import speech_v2
 from google.cloud.speech_v2.types import cloud_speech
 
 from .config import (
+    PROJECT_ID,
     RECOGNIZER_PATH,
     STT_API_ENDPOINT,
     STT_MODEL,

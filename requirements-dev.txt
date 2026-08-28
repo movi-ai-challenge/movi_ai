@@ -1,0 +1,27 @@
+# ============================================================
+# MOVI AI - 개발 전용 의존성
+#
+#   pip install -r requirements-dev.txt
+#
+# 서버 컨테이너에는 설치하지 않는다.
+# (API 런타임이 이 중 무엇도 import 하지 않는 것을 확인함)
+# ============================================================
+
+-r requirements.txt
+
+# 테스트
+pytest==9.1.1
+
+# 학습 / 평가 그래프 (train_iforest.py, evaluate.py)
+matplotlib==3.11.1
+
+# 노트북
+jupyter==1.1.1
+ipykernel==7.2.0
+
+# 로컬 마이크 입력 (test_stream_stt.py 전용)
+#
+# 주의: Linux 에서는 휠에 libportaudio 가 포함돼 있지 않다.
+#       sudo apt-get install -y libportaudio2  가 별도로 필요하다.
+#       (macOS/Windows 는 휠에 번들되어 있어 불필요)
+sounddevice==0.5.6

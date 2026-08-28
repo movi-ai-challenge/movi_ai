@@ -1,0 +1,45 @@
+# ============================================================
+# 줄바꿈 고정 (macOS <-> Windows 혼용 대응)
+#
+# 이 파일이 없으면 Windows 에서 커밋할 때 core.autocrlf 로 인해
+# setup.sh / run.sh 가 CRLF 로 바뀌어 macOS 에서 실행 불가가 된다.
+#   -> bash: setup.sh: cannot execute: required file not found
+# ============================================================
+
+* text=auto
+
+# Unix 스크립트: 반드시 LF
+*.sh        text eol=lf
+
+# PowerShell: CRLF + UTF-8 BOM 이어야 5.1 에서 한글이 깨지지 않는다
+*.ps1       text eol=crlf
+
+# 컨테이너/CI 파일: Windows 체크아웃에서 CRLF 가 되면
+# Dockerfile 의 줄 continuation(\) 과 compose 파싱이 깨질 수 있다
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+*.py        text eol=lf
+*.md        text eol=lf
+*.json      text eol=lf
+*.txt       text eol=lf
+*.ini       text eol=lf
+.env*       text eol=lf
+
+# 바이너리 (변환 금지)
+*.joblib    binary
+*.mp3       binary
+*.zip       binary
+*.tar.gz    binary
+*.csv       -text
+
+# ============================================================
+# 이미 커밋되어 있는 vendored 트리는 줄바꿈 정규화 대상에서 제외한다.
+# 제외하지 않으면 `* text=auto` 가 수만 개 파일을 건드려
+# 줄바꿈만 바뀐 거대한 diff 가 생긴다.
+# ============================================================
+.venv/**              -text
+.venv-win/**          -text
+google-cloud-sdk/**   -text

@@ -1,0 +1,45 @@
+# ============================================================
+# 이미지에 넣지 않을 것
+#
+# data/ 648MB, .venv 487MB, google-cloud-sdk 467MB 는
+# 서버 런타임에서 전혀 쓰지 않는다. 넣으면 이미지가 1.5GB+ 커진다.
+# ============================================================
+
+# 학습 데이터 (API 는 읽지 않음. 재학습은 EC2 밖에서)
+data/
+
+# 가상환경
+.venv/
+.venv-win/
+venv/
+
+# mac 전용 SDK
+google-cloud-sdk/
+google-cloud-cli-*.tar.gz
+
+# 비밀정보 (환경변수로 주입한다. 절대 이미지에 굽지 않는다)
+.env
+.env.local
+*-service-account.json
+
+# git
+.git/
+.gitignore
+.gitattributes
+
+# 파이썬 캐시
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# 문서 / 노트북 / 로컬 스크립트
+*.md
+notebooks/
+setup.sh
+setup.ps1
+run.sh
+run.ps1
+
+# 산출물
+outputs/

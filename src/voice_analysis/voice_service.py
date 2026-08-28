@@ -149,6 +149,14 @@ class VoiceAnalysisService:
             "entities": (
                 entities
             ),
+
+            "intent_confidence": (
+                getattr(
+                    analysis,
+                    "intent_confidence",
+                    0.5,
+                )
+            ),
         }
 
 
@@ -202,3 +210,61 @@ class VoiceAnalysisService:
                 updated_entities
             ),
         }
+
+
+    # ========================================================
+    # 내부 API 계약 경로
+    #
+    # 백엔드가 세션을 이미 열어둔 상태에서 호출하므로
+    # 호출어("모비야")를 요구하지 않는다. 재질문 답변("오만 원")에는
+    # 호출어가 없고, 요구하면 전부 ignored 로 떨어진다.
+    # 호출어가 붙어 있으면 제거만 한다.
+    # ========================================================
+
+    def analyze_command(
+        self,
+        text: str,
+    ):
+        """
+        호출어 유무와 무관하게 명령 본문을 분석한다.
+
+        Returns:
+            RequirementAnalysis
+        """
+
+        wake_result = (
+            self.wake_word_detector.detect(text)
+        )
+
+        if wake_result.activated and wake_result.command:
+            command = wake_result.command
+        else:
+            command = text.strip()
+
+        if not command:
+            raise ValueError(
+                "분석할 명령이 비어 있습니다."
+            )
+
+        return (
+            self.requirement_analyzer.analyze(command)
+        )
+
+
+    def parse_follow_up(
+        self,
+        *,
+        field_name: str,
+        text: str,
+    ):
+        """
+        재질문 답변에서 지정된 필드 하나만 추출한다.
+
+        Returns:
+            FollowUpEntityResult
+        """
+
+        return self.follow_up_parser.parse(
+            field_name=field_name,
+            user_text=text,
+        )

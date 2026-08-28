@@ -1,8 +1,33 @@
-pandas
-numpy
-scikit-learn
-joblib
-matplotlib
-fastapi
-uvicorn[standard]
-requests
+# ============================================================
+# MOVI AI - 런타임 의존성 (서버 / 컨테이너)
+#
+# Python 3.11 / 3.12
+#
+# 버전은 models/*.joblib 를 학습했던 환경 기준으로 고정한다.
+# scikit-learn / numpy / scipy 버전이 다르면 joblib 로드 시
+# InconsistentVersionWarning 또는 로드 실패가 발생한다.
+#
+# 개발용(테스트/노트북/그래프/마이크)은 requirements-dev.txt 참고.
+# ============================================================
+
+# ----- 데이터 / ML (FDS) -----
+numpy==2.4.6
+pandas==3.0.5
+scipy==1.17.1
+scikit-learn==1.9.0
+joblib==1.5.3
+
+# ----- API 서버 -----
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.4
+python-multipart==0.0.20
+
+# ----- 설정 / HTTP -----
+python-dotenv==1.2.3
+requests==2.34.2
+
+# ----- 음성 분석 -----
+openai==3.1.0
+google-cloud-speech==2.40.0
+google-cloud-texttospeech==2.37.0

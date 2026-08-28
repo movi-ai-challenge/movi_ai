@@ -10,6 +10,7 @@ IntentType = Literal[
     "read_screen",
     "transfer_money",
     "check_history",
+    "check_balance",
     "check_savings",
     "confirm",
     "deny",
@@ -59,6 +60,14 @@ class RequirementAnalysis(BaseModel):
     """
 
     intent: IntentType
+
+    # 0.0 ~ 1.0. ai-api-contract.md 의 intentConfidence 로 나간다.
+    # 모델 자기보고 값이며 보정(calibration)된 수치가 아니다.
+    intent_confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+    )
 
     entities: RequirementEntities = Field(
         default_factory=RequirementEntities
