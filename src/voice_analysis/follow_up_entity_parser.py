@@ -88,7 +88,16 @@ class FollowUpEntityParser:
     }
 
     def __init__(self):
-        self.client = OpenAI()
+        # OpenAI 클라이언트는 첫 호출 때 만든다.
+        # 생성자에서 만들면 OPENAI_API_KEY 가 없는 환경에서
+        # import 만으로 죽어 CI 테스트 수집이 실패한다.
+        self._client = None
+
+    @property
+    def client(self) -> OpenAI:
+        if self._client is None:
+            self._client = OpenAI()
+        return self._client
 
     def parse(
         self,
