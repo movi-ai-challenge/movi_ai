@@ -29,6 +29,7 @@ services:
       TZ: Asia/Seoul
       APP_MODULE: src.fraud_detection.api:app
       PORT: "8000"
+      ROOT_PATH: /ai/fds
       UVICORN_WORKERS: "${FDS_WORKERS:-1}"
       FDS_MODEL_PATH: models/electronic/isolation_forest.joblib
       FDS_THRESHOLD: "${FDS_THRESHOLD:?FDS_THRESHOLD 를 .env 에 설정하세요}"
@@ -56,6 +57,7 @@ services:
       TZ: Asia/Seoul
       APP_MODULE: src.voice_analysis.api:app
       PORT: "8001"
+      ROOT_PATH: /ai/voice
       UVICORN_WORKERS: "${VOICE_WORKERS:-1}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:?OPENAI_API_KEY 를 .env 에 설정하세요}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5-nano}"

@@ -195,7 +195,7 @@ jobs:
 
             # ---- 컨테이너 2개를 각각 교체한다 ----
             deploy_one() {
-              NAME="$1"; APP_MODULE="$2"; PORT="$3"
+              NAME="$1"; APP_MODULE="$2"; PORT="$3"; ROOT_PATH="$4"
               BACKUP="${NAME}-rollback"
 
               sudo docker rm --force "$BACKUP" 2>/dev/null || true
@@ -215,6 +215,7 @@ jobs:
                 --env TZ=Asia/Seoul \
                 --env APP_MODULE="$APP_MODULE" \
                 --env PORT="$PORT" \
+                --env ROOT_PATH="$ROOT_PATH" \
                 --volume "${SECRETS_DIRECTORY}:/app/secrets:ro" \
                 "$IMAGE_REFERENCE"; then
                 restore "$NAME" "$BACKUP"
@@ -244,7 +245,8 @@ jobs:
               fi
             }
 
-            deploy_one movi-ai-fds   src.fraud_detection.api:app 8000
-            deploy_one movi-ai-voice src.voice_analysis.api:app  8001
+            # 4번째 인자는 nginx 가 붙이는 공개 접두사(--root-path)다.
+            deploy_one movi-ai-fds   src.fraud_detection.api:app 8000 /ai/fds
+            deploy_one movi-ai-voice src.voice_analysis.api:app  8001 /ai/voice
 
             echo "Deployment completed: $IMAGE_REFERENCE"

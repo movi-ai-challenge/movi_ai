@@ -48,7 +48,8 @@ ENV PATH="/opt/venv/bin:$PATH" \
     TZ=Asia/Seoul \
     APP_MODULE=src.fraud_detection.api:app \
     PORT=8000 \
-    UVICORN_WORKERS=1
+    UVICORN_WORKERS=1 \
+    ROOT_PATH=
 
 EXPOSE 8000
 
@@ -60,4 +61,8 @@ sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ['PORT']+'/he
 
 USER movi
 
-CMD ["sh", "-c", "exec uvicorn \"$APP_MODULE\" --host 0.0.0.0 --port \"$PORT\" --workers \"$UVICORN_WORKERS\""]
+# --root-path: 리버스 프록시가 접두사를 붙여 노출할 때 필요하다.
+# nginx 가 /ai/voice/ 로 받아 접두사를 떼고 넘기므로, 앱이 접두사를 모르면
+# /docs 가 참조하는 openapi.json 과 Try it out 요청 경로가 백엔드로 잘못 간다.
+# 비어 있으면 (로컬/컨테이너 직접 호출) 아무 영향이 없다.
+CMD ["sh", "-c", "exec uvicorn \"$APP_MODULE\" --host 0.0.0.0 --port \"$PORT\" --workers \"$UVICORN_WORKERS\" --root-path \"$ROOT_PATH\""]
