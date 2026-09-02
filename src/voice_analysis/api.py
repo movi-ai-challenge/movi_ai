@@ -23,8 +23,8 @@ from .contract_schemas import (
 )
 
 from .contract_mapper import (
+    map_entity_confidences,
     detect_missing_slots,
-    empty_confidences,
     map_entities,
     map_intent,
 )
@@ -306,7 +306,7 @@ async def analyze_voice_internal(
 
     try:
         if follow_up_field is not None:
-            intent, confidence, raw_entities = _analyze_follow_up(
+            intent, confidence, raw_entities, raw_confidences = _analyze_follow_up(
                 field_name=follow_up_field,
                 transcript=transcript,
                 expected_intent=expectedIntent,
@@ -317,6 +317,7 @@ async def analyze_voice_internal(
             intent = map_intent(analysis.intent)
             confidence = float(analysis.intent_confidence)
             raw_entities = analysis.entities.model_dump()
+            raw_confidences = analysis.entity_confidences.model_dump()
 
     except Exception as error:
         raise _contract_error(
@@ -343,7 +344,11 @@ async def analyze_voice_internal(
         intent=intent,
         intentConfidence=confidence,
         entities=entities,
-        entityConfidences=empty_confidences(),
+        entityConfidences=map_entity_confidences(
+            raw_entities,
+            raw_confidences,
+            entities,
+        ),
         detectedMissingEntities=detect_missing_slots(
             intent=intent,
             entities=entities,
@@ -394,7 +399,7 @@ def analyze_command_text(
     follow_up_field = _resolve_follow_up_field(expected_slots)
 
     if follow_up_field is not None:
-        intent, confidence, raw_entities = _analyze_follow_up(
+        intent, confidence, raw_entities, raw_confidences = _analyze_follow_up(
             field_name=follow_up_field,
             transcript=transcript,
             expected_intent=expected_intent,
@@ -404,6 +409,7 @@ def analyze_command_text(
         intent = map_intent(analysis.intent)
         confidence = float(analysis.intent_confidence)
         raw_entities = analysis.entities.model_dump()
+        raw_confidences = analysis.entity_confidences.model_dump()
 
     entities = map_entities(raw_entities)
 
@@ -415,7 +421,11 @@ def analyze_command_text(
         intent=intent,
         intentConfidence=confidence,
         entities=entities,
-        entityConfidences=empty_confidences(),
+        entityConfidences=map_entity_confidences(
+            raw_entities,
+            raw_confidences,
+            entities,
+        ),
         detectedMissingEntities=detect_missing_slots(
             intent=intent,
             entities=entities,
@@ -504,6 +514,7 @@ def _analyze_follow_up(
             intent = candidate
 
     entities: dict = {}
+    confidences: dict = {}
 
     if parsed.success:
         entity_key = _FIELD_TO_ENTITY.get(
@@ -512,10 +523,15 @@ def _analyze_follow_up(
         )
         entities[entity_key] = parsed.value
         confidence = 0.9
+
+        # 재질문 답변은 슬롯 하나만 뽑는 파서를 탄다. 성공 여부가 곧 확신도라
+        # intent 확신도와 같은 값을 쓴다 - 여기서 null 로 두면 백엔드가
+        # 방금 되물어 받은 답을 또 믿지 못해 같은 질문을 반복한다.
+        confidences[entity_key] = confidence
     else:
         confidence = 0.3
 
-    return intent, confidence, entities
+    return intent, confidence, entities, confidences
 
 
 def _contract_error(
