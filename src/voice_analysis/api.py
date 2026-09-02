@@ -372,6 +372,58 @@ _FIELD_TO_ENTITY = {
 }
 
 
+
+def analyze_command_text(
+    *,
+    request_id: str,
+    voice_session_id: int,
+    transcript: str,
+    stt_confidence: float,
+    expected_intent: str | None = None,
+    expected_slots: str | None = None,
+) -> VoiceAnalyzeContractResponse:
+    """
+    인식된 문장에서 의도와 엔티티를 뽑아 계약 형식으로 만든다.
+
+    배치 경로와 스트리밍 경로가 같은 함수를 쓴다. 두 경로가 각자 분석하면 같은
+    말에 다른 판단이 나올 수 있고, 화면에 보인 문장과 실제로 실행되는 명령이
+    어긋난다. 돈이 움직이는 흐름에서 그 어긋남은 그대로 사고가 된다.
+    """
+    started = time.perf_counter()
+
+    follow_up_field = _resolve_follow_up_field(expected_slots)
+
+    if follow_up_field is not None:
+        intent, confidence, raw_entities = _analyze_follow_up(
+            field_name=follow_up_field,
+            transcript=transcript,
+            expected_intent=expected_intent,
+        )
+    else:
+        analysis = voice_service.analyze_command(transcript)
+        intent = map_intent(analysis.intent)
+        confidence = float(analysis.intent_confidence)
+        raw_entities = analysis.entities.model_dump()
+
+    entities = map_entities(raw_entities)
+
+    return VoiceAnalyzeContractResponse(
+        requestId=request_id,
+        voiceSessionId=voice_session_id,
+        transcript=transcript,
+        sttConfidence=stt_confidence,
+        intent=intent,
+        intentConfidence=confidence,
+        entities=entities,
+        entityConfidences=empty_confidences(),
+        detectedMissingEntities=detect_missing_slots(
+            intent=intent,
+            entities=entities,
+        ),
+        processingMs=int((time.perf_counter() - started) * 1000),
+    )
+
+
 def _get_stt_service():
     """
     STT 클라이언트를 첫 호출 시점에 만든다.
@@ -523,7 +575,12 @@ def _get_stt_stream_service() -> STTStreamService:
 
 
 @app.websocket("/internal/v1/voice/stream")
-async def stream_voice_internal(websocket: WebSocket):
+async def stream_voice_internal(
+    websocket: WebSocket,
+    voiceSessionId: int = 0,
+    expectedIntent: Optional[str] = None,
+    expectedSlots: Optional[str] = None,
+):
     """
     말하는 도중에 오디오 조각을 받아 인식 결과를 실시간으로 돌려준다.
 
@@ -536,9 +593,15 @@ async def stream_voice_internal(websocket: WebSocket):
               텍스트 "EOS" 를 받으면 더 보낼 오디오가 없다는 뜻이다.
     보낸다  : {"type": "interim"|"final", "text", "activated", "command",
                "fullText", "confidence", "stability"}
+              확정 발화에 호출어가 있으면 뒤이어
+              {"type": "analysis", ...VoiceAnalyzeContractResponse} 를 보낸다.
               오류는 {"type": "error", "code", "message", "retryable"}
 
     호출어를 만나기 전까지 activated 는 false 이고 command 는 비어 있다.
+
+    분석까지 여기서 마치는 이유는, 화면에 보인 문장과 실제로 실행되는 명령이
+    같아야 하기 때문이다. 백엔드가 나중에 오디오를 다시 인식하면 두 값이 달라질
+    수 있고, 사용자는 자기가 본 것과 다른 이체를 마주하게 된다.
     """
     await websocket.accept()
 
@@ -570,7 +633,37 @@ async def stream_voice_internal(websocket: WebSocket):
 
     try:
         async for result in _get_stt_stream_service().recognize(audio_stream):
-            await websocket.send_json(session.consume(result))
+            message = session.consume(result)
+            await websocket.send_json(message)
+
+            if message["type"] != "final" or not message["activated"]:
+                continue
+            command = (message["command"] or "").strip()
+            if not command:
+                continue
+
+            # 분석 실패로 연결을 끊지 않는다. 인식된 문장은 이미 화면에 떠 있고,
+            # 사용자에게는 그 뒤가 조용해지는 것보다 오류를 듣는 편이 낫다.
+            try:
+                analysis = analyze_command_text(
+                    request_id=f"voice-stream-{voiceSessionId}",
+                    voice_session_id=voiceSessionId,
+                    transcript=command,
+                    stt_confidence=float(message.get("confidence") or 0.0),
+                    expected_intent=expectedIntent,
+                    expected_slots=expectedSlots,
+                )
+                await websocket.send_json({
+                    "type": "analysis",
+                    **analysis.model_dump(),
+                })
+            except Exception as error:
+                await websocket.send_json({
+                    "type": "error",
+                    "code": "MODEL_INFERENCE_ERROR",
+                    "message": f"{type(error).__name__}: {error}",
+                    "retryable": True,
+                })
 
     except WebSocketDisconnect:
         pass
