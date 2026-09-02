@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -11,6 +12,8 @@ from fastapi import (
     Form,
     HTTPException,
     UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
 )
 
 from .contract_schemas import (
@@ -30,6 +33,10 @@ from .stt_batch_service import (
     SttBatchService,
     SttError,
 )
+
+from .stt_stream_service import STTStreamService
+
+from .stream_session import AudioStream, StreamSession
 
 from .api_schemas import (
     VoiceAnalyzeRequest,
@@ -496,3 +503,95 @@ def _contract_error(
             ),
         ).model_dump(),
     )
+
+
+# ============================================================
+# 스트리밍 음성 인식 (WebSocket)
+# ============================================================
+
+_stt_stream_service: STTStreamService | None = None
+
+
+def _get_stt_stream_service() -> STTStreamService:
+    """
+    Google 클라이언트 생성은 비싸다. 세션마다 만들지 않고 재사용한다.
+    """
+    global _stt_stream_service
+    if _stt_stream_service is None:
+        _stt_stream_service = STTStreamService()
+    return _stt_stream_service
+
+
+@app.websocket("/internal/v1/voice/stream")
+async def stream_voice_internal(websocket: WebSocket):
+    """
+    말하는 도중에 오디오 조각을 받아 인식 결과를 실시간으로 돌려준다.
+
+    배치 경로(POST /internal/v1/voice/analyze)는 그대로 둔다. WebSocket 을 쓸 수
+    없는 환경과, 녹음 파일을 통째로 올리는 기존 흐름이 계속 필요하다.
+
+    주고받는 것
+    ----------
+    받는다  : 오디오 조각(binary). PCM16 / 16kHz / mono.
+              텍스트 "EOS" 를 받으면 더 보낼 오디오가 없다는 뜻이다.
+    보낸다  : {"type": "interim"|"final", "text", "activated", "command",
+               "fullText", "confidence", "stability"}
+              오류는 {"type": "error", "code", "message", "retryable"}
+
+    호출어를 만나기 전까지 activated 는 false 이고 command 는 비어 있다.
+    """
+    await websocket.accept()
+
+    audio_stream = AudioStream()
+    session = StreamSession()
+
+    async def pump_audio() -> None:
+        """
+        WebSocket 수신을 큐로 옮긴다. 인식과 수신을 한 루프에 두면 Google 응답을
+        기다리는 동안 오디오를 못 받아 조각이 밀린다.
+        """
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+                chunk = message.get("bytes")
+                if chunk:
+                    await audio_stream.push(chunk)
+                    continue
+                if message.get("text") == "EOS":
+                    break
+        except WebSocketDisconnect:
+            pass
+        finally:
+            await audio_stream.close()
+
+    pump = asyncio.create_task(pump_audio())
+
+    try:
+        async for result in _get_stt_stream_service().recognize(audio_stream):
+            await websocket.send_json(session.consume(result))
+
+    except WebSocketDisconnect:
+        pass
+
+    except Exception as error:
+        # 인식이 실패해도 연결을 그냥 끊지 않는다. 화면을 보지 않는 사용자에게는
+        # "왜 멈췄는지" 알 방법이 응답뿐이다.
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "code": "STT_PROVIDER_ERROR",
+                "message": f"{type(error).__name__}: {error}",
+                "retryable": True,
+            })
+        except Exception:
+            pass
+
+    finally:
+        await audio_stream.close()
+        pump.cancel()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
