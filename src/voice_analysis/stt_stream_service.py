@@ -4,6 +4,8 @@ from google.api_core.client_options import ClientOptions
 from google.cloud import speech_v2
 from google.cloud.speech_v2.types import cloud_speech
 
+from .stream_session import aggregate_results
+
 from .config import (
     PROJECT_ID,
     RECOGNIZER_PATH,
@@ -14,6 +16,7 @@ from .config import (
     AUDIO_CHANNEL_COUNT,
     ENABLE_INTERIM_RESULTS,
 )
+
 
 
 class STTStreamService:
@@ -137,30 +140,5 @@ class STTStreamService:
 
         async for response in responses:
 
-            for result in response.results:
-
-                if not result.alternatives:
-                    continue
-
-                alternative = result.alternatives[0]
-
-                transcript = alternative.transcript.strip()
-
-                if not transcript:
-                    continue
-
-                if result.is_final:
-
-                    yield {
-                        "type": "final",
-                        "text": transcript,
-                        "confidence": alternative.confidence,
-                    }
-
-                else:
-
-                    yield {
-                        "type": "interim",
-                        "text": transcript,
-                        "stability": result.stability,
-                    }
+            for message in aggregate_results(response.results):
+                yield message

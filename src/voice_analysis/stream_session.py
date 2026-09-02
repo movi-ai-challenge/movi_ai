@@ -133,3 +133,50 @@ class StreamSession:
         들어오면("모비야" / "오만원 보내줘") 조각 하나만 봐서는 찾지 못한다.
         """
         return self._detector.detect(text)
+
+
+def aggregate_results(results) -> list[dict]:
+    """
+    한 응답에 담긴 인식 결과들을 화면에 쓸 메시지로 묶는다.
+
+    <b>확정 전 조각은 하나로 합쳐야 한다.</b> Google 은 진행 중인 발화를 여러
+    조각으로 나눠 한 응답에 함께 싣는다. 조각마다 따로 내보내면 받는 쪽은 마지막
+    조각만 남겨 앞부분을 잃는다. 실제로 화면 문장이
+    '모비야 김민수한테' -> '모비야' -> '김민수한테' 처럼 뒤로 갔다.
+
+    확정된 결과는 합치지 않는다. 각각이 완결된 구간이라 받는 쪽이 순서대로
+    누적해야 한다.
+    """
+    messages: list[dict] = []
+    pending: list[str] = []
+    stability = None
+
+    for result in results:
+        alternatives = getattr(result, "alternatives", None)
+        if not alternatives:
+            continue
+
+        alternative = alternatives[0]
+        transcript = (alternative.transcript or "").strip()
+        if not transcript:
+            continue
+
+        if result.is_final:
+            messages.append({
+                "type": "final",
+                "text": transcript,
+                "confidence": alternative.confidence,
+            })
+            continue
+
+        pending.append(transcript)
+        stability = result.stability
+
+    if pending:
+        messages.append({
+            "type": "interim",
+            "text": " ".join(pending),
+            "stability": stability,
+        })
+
+    return messages
