@@ -8,7 +8,7 @@ from .config import (
     PROJECT_ID,
     RECOGNIZER_PATH,
     STT_API_ENDPOINT,
-    STT_MODEL,
+    STT_STREAM_MODEL,
     LANGUAGE_CODE,
     AUDIO_SAMPLE_RATE,
     AUDIO_CHANNEL_COUNT,
@@ -60,7 +60,7 @@ class STTStreamService:
 
         recognition_config = cloud_speech.RecognitionConfig(
             explicit_decoding_config=decoding_config,
-            model=STT_MODEL,
+            model=STT_STREAM_MODEL,
             language_codes=[LANGUAGE_CODE],
         )
 

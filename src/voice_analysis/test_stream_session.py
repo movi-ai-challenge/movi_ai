@@ -77,3 +77,25 @@ def test_확정된_문장은_사라지지_않는다():
     result = session.consume(final("오만원 보내줘"))
 
     assert result["fullText"] == "모비야 김민수한테 오만원 보내줘"
+
+
+def test_STT_가_흘린_호출어_변형도_받는다():
+    """
+    실측에서 모델별로 모비야 / 모비아 / 모기야 로 갈렸다. 한 글자 차이로
+    호출을 못 알아들으면 사용자는 이유 없이 계속 다시 부르게 된다.
+    """
+    for heard in ["모비야", "모비아", "무비야", "모비 야", "movi야"]:
+        session = StreamSession()
+
+        result = session.consume(final(f"{heard} 오만원 보내줘"))
+
+        assert result["activated"] is True, heard
+        assert result["command"] == "오만원 보내줘", heard
+
+
+def test_비슷하지_않은_말은_호출어로_보지_않는다():
+    session = StreamSession()
+
+    result = session.consume(final("오늘 모임 있어"))
+
+    assert result["activated"] is False
