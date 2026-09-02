@@ -1,0 +1,266 @@
+{
+    "openapi": "3.1.0",
+    "info": {
+        "title": "MOVI Voice Analysis API",
+        "description": "MOVI STT 기반 음성 요구사항 분석 API",
+        "version": "0.1.0"
+    },
+    "paths": {
+        "/": {
+            "get": {
+                "summary": "Root",
+                "operationId": "root__get",
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/health": {
+            "get": {
+                "summary": "Health",
+                "operationId": "health_health_get",
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/voice/analyze": {
+            "post": {
+                "summary": "Analyze Voice",
+                "operationId": "analyze_voice_api_v1_voice_analyze_post",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/VoiceAnalyzeRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/VoiceAnalyzeResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/voice/follow-up": {
+            "post": {
+                "summary": "Analyze Follow Up",
+                "operationId": "analyze_follow_up_api_v1_voice_follow_up_post",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/VoiceFollowUpRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {}
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "HTTPValidationError": {
+                "properties": {
+                    "detail": {
+                        "items": {
+                            "$ref": "#/components/schemas/ValidationError"
+                        },
+                        "type": "array",
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "title": "HTTPValidationError"
+            },
+            "ValidationError": {
+                "properties": {
+                    "loc": {
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "integer"
+                                }
+                            ]
+                        },
+                        "type": "array",
+                        "title": "Location"
+                    },
+                    "msg": {
+                        "type": "string",
+                        "title": "Message"
+                    },
+                    "type": {
+                        "type": "string",
+                        "title": "Error Type"
+                    },
+                    "input": {
+                        "title": "Input"
+                    },
+                    "ctx": {
+                        "type": "object",
+                        "title": "Context"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "loc",
+                    "msg",
+                    "type"
+                ],
+                "title": "ValidationError"
+            },
+            "VoiceAnalyzeRequest": {
+                "properties": {
+                    "transcript": {
+                        "type": "string",
+                        "minLength": 1,
+                        "title": "Transcript",
+                        "description": "Google STT 최종 인식 결과"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "transcript"
+                ],
+                "title": "VoiceAnalyzeRequest"
+            },
+            "VoiceAnalyzeResponse": {
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "title": "Status"
+                    },
+                    "intent": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Intent"
+                    },
+                    "transcript": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Transcript"
+                    },
+                    "entities": {
+                        "additionalProperties": true,
+                        "type": "object",
+                        "title": "Entities"
+                    },
+                    "message": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Message"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "status"
+                ],
+                "title": "VoiceAnalyzeResponse"
+            },
+            "VoiceFollowUpRequest": {
+                "properties": {
+                    "transcript": {
+                        "type": "string",
+                        "minLength": 1,
+                        "title": "Transcript",
+                        "description": "추가 정보에 대한 사용자 음성 인식 결과"
+                    },
+                    "requested_field": {
+                        "type": "string",
+                        "title": "Requested Field",
+                        "description": "Backend에서 추가로 요청한 Entity 이름"
+                    },
+                    "entities": {
+                        "additionalProperties": true,
+                        "type": "object",
+                        "title": "Entities",
+                        "description": "기존에 추출된 Entity"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "transcript",
+                    "requested_field"
+                ],
+                "title": "VoiceFollowUpRequest"
+            }
+        }
+    }
+}

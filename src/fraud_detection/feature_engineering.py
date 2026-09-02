@@ -17,7 +17,7 @@ from sklearn.preprocessing import OneHotEncoder
 try:
     from .config import TARGET_COLUMN
 except ImportError:
-    from config import TARGET_COLUMN
+    from fraud_detection.config import TARGET_COLUMN
 
 
 # ============================================================

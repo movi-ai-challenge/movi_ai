@@ -1,3 +1,10 @@
+"""Legacy model-only inference adapter.
+
+API 운영 경로에서는 사용하지 않는다. 공식 추론 경로는
+``api.py → FraudDetectionService``이며 Rule Engine과 Final Risk Score까지
+한 번에 계산한다. 이 모듈은 기존 테스트와 비교 실험을 위해 유지한다.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path

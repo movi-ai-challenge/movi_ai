@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from typing import Optional
@@ -37,12 +38,20 @@ from .stt_batch_service import (
 from .stt_stream_service import STTStreamService
 
 from .stream_session import AudioStream, StreamSession
-
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    RateLimitError,
+)
 from .api_schemas import (
     VoiceAnalyzeRequest,
     VoiceFollowUpRequest,
     VoiceAnalyzeResponse,
+    VoiceFollowUpResponse,
 )
+
+
+logger = logging.getLogger(__name__)
 
 from .voice_service import (
     VoiceAnalysisService,
@@ -63,7 +72,7 @@ app = FastAPI(
         "MOVI STT 기반 음성 요구사항 분석 API"
     ),
 
-    version="0.1.0",
+    version="0.2.0",
 )
 
 
@@ -71,9 +80,53 @@ app = FastAPI(
 # Service
 # ============================================================
 
-voice_service = (
-    VoiceAnalysisService()
-)
+voice_service: VoiceAnalysisService | None = None
+voice_service_load_error: str | None = None
+
+
+def load_voice_service() -> None:
+    """분석기를 안전하게 초기화한다.
+
+    OpenAI 환경설정이 없거나 Client 초기화가 실패해도 FastAPI 자체는
+    기동하여 /health와 /ready에서 상태를 확인할 수 있게 한다.
+    """
+
+    global voice_service
+    global voice_service_load_error
+
+    voice_service = None
+    voice_service_load_error = None
+
+    try:
+        voice_service = VoiceAnalysisService()
+        logger.info("Voice analysis service loaded successfully")
+    except Exception as error:
+        voice_service_load_error = type(error).__name__
+        logger.exception("Failed to load voice analysis service")
+
+
+def voice_service_ready() -> bool:
+    return (
+        voice_service is not None
+        and voice_service_load_error is None
+    )
+
+
+def require_voice_service() -> VoiceAnalysisService:
+    if not voice_service_ready():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "VOICE_ANALYZER_NOT_READY",
+                "message": "음성 요구사항 분석기가 준비되지 않았습니다.",
+            },
+        )
+
+    # voice_service_ready()에서 None이 아님을 확인했다.
+    return voice_service
+
+
+load_voice_service()
 
 
 # ============================================================
@@ -90,6 +143,8 @@ def root():
         ),
 
         "status": "running",
+
+        "version": "0.2.0",
     }
 
 
@@ -118,13 +173,38 @@ def health():
             },
         )
 
+    ready = voice_service_ready()
+
     return {
 
-        "status": "ok",
+        "status": "ok" if ready else "degraded",
 
         "service": (
             "voice-analysis"
         ),
+
+        "analyzer_loaded": ready,
+
+        "error_code": (
+            None
+            if ready
+            else "VOICE_ANALYZER_LOAD_FAILED"
+        ),
+    }
+
+
+# ============================================================
+# Readiness
+# ============================================================
+
+@app.get("/ready")
+def ready():
+
+    require_voice_service()
+
+    return {
+        "status": "ready",
+        "service": "voice-analysis",
     }
 
 
@@ -142,8 +222,10 @@ def analyze_voice(
 
     try:
 
+        service = require_voice_service()
+
         result = (
-            voice_service.analyze(
+            service.analyze(
                 request.transcript
             )
         )
@@ -185,14 +267,58 @@ def analyze_voice(
         )
 
 
+    except HTTPException:
+        raise
+
+
+    except (
+        APITimeoutError,
+        APIConnectionError,
+        RateLimitError,
+    ) as error:
+
+        logger.warning(
+            "Voice analyzer is temporarily unavailable: %s",
+            type(error).__name__,
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "VOICE_ANALYZER_UNAVAILABLE",
+                "message": "음성 요구사항 분석 서비스를 일시적으로 사용할 수 없습니다.",
+            },
+        ) from error
+
+
+    except ValueError as error:
+
+        # 사용자 transcript나 계좌정보가 예외 문자열에 포함될 수 있으므로
+        # 구체적인 오류값은 로그에 남기지 않는다.
+        logger.warning(
+            "Voice request rejected: error_type=%s",
+            type(error).__name__,
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_VOICE_REQUEST",
+                "message": "음성 분석 요청이 올바르지 않습니다.",
+            },
+        ) from error
+
+
     except Exception as error:
+
+        logger.exception("Unexpected error during voice analysis")
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"{type(error).__name__}: "
-                f"{str(error)}"
-            ),
+            detail={
+                "code": "VOICE_ANALYSIS_FAILED",
+                "message": "음성 요구사항 분석 중 내부 오류가 발생했습니다.",
+            },
         ) from error
 
 
@@ -202,6 +328,7 @@ def analyze_voice(
 
 @app.post(
     "/api/v1/voice/follow-up",
+    response_model=VoiceFollowUpResponse,
 )
 def analyze_follow_up(
     request: VoiceFollowUpRequest,
@@ -209,8 +336,10 @@ def analyze_follow_up(
 
     try:
 
+        service = require_voice_service()
+
         return (
-            voice_service
+            service
             .analyze_follow_up(
 
                 requested_field=(
@@ -228,14 +357,56 @@ def analyze_follow_up(
         )
 
 
+    except HTTPException:
+        raise
+
+
+    except (
+        APITimeoutError,
+        APIConnectionError,
+        RateLimitError,
+    ) as error:
+
+        logger.warning(
+            "Voice follow-up analyzer is temporarily unavailable: %s",
+            type(error).__name__,
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "VOICE_ANALYZER_UNAVAILABLE",
+                "message": "음성 요구사항 분석 서비스를 일시적으로 사용할 수 없습니다.",
+            },
+        ) from error
+
+
+    except ValueError as error:
+
+        logger.warning(
+            "Voice follow-up rejected: error_type=%s",
+            type(error).__name__,
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_FOLLOW_UP_REQUEST",
+                "message": "추가 정보 분석 요청이 올바르지 않습니다.",
+            },
+        ) from error
+
+
     except Exception as error:
+
+        logger.exception("Unexpected error during voice follow-up analysis")
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"{type(error).__name__}: "
-                f"{str(error)}"
-            ),
+            detail={
+                "code": "VOICE_FOLLOW_UP_FAILED",
+                "message": "추가 정보 분석 중 내부 오류가 발생했습니다.",
+            },
         ) from error
 
 # ============================================================

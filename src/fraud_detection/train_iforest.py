@@ -41,7 +41,7 @@ try:
 
 except ImportError:
 
-    from config import (
+    from fraud_detection.config import (
         ELECTRONIC_CONFIG,
         CARD_CONFIG,
         ISOLATION_FOREST_PARAMS,

@@ -3,6 +3,10 @@ from openai import OpenAI
 from .config import OPENAI_MODEL
 from .schemas import RequirementAnalysis
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 SYSTEM_PROMPT = """
 너는 금융 음성 비서 MOVI의 요구사항 분석기다.
@@ -101,26 +105,19 @@ check_history에서 추출 가능한 값:
 6. normalized_command에는 사용자의 의도를 간단하고 명확하게
    정리한 한국어 명령을 작성한다.
 
-7. transfer_money의 경우 다음 정보가 없으면
-   missing_fields에 추가한다.
+7. missing_fields는 이전 코드와의 호환을 위한 필드다.
+   필수값과 누락값은 Spring Backend가 판단하므로 항상 빈 배열로 반환한다.
 
-   - recipient_name
-   - amount
+8. source_bank/source_account는 사용자가 명시적으로 말하지 않았다면
+   null로 둔다. 사용자의 보유 계좌 조회와 선택은 Backend가 담당한다.
 
-   은행과 계좌번호는 필수가 아니다. 사용자는 "엄마한테"처럼
-   등록해 둔 이름만 부르고, 실제 계좌는 백엔드가 찾는다.
-   이것을 필수로 두면 정상적인 발화를 불완전한 요청으로 판단하게 된다.
+9. 사용자는 "엄마한테"처럼 등록해 둔 이름만 말할 수 있다.
+   사용자가 은행이나 계좌번호를 말하지 않았다면 null로 두고,
+   등록 수취인과 실제 계좌 조회는 Backend가 담당한다.
 
-source_bank/source_account는 사용자의 보유 계좌 목록을
-백엔드에서 받은 뒤 선택할 수 있으므로,
-현재 단계에서는 사용자가 명시적으로 말하지 않았다면 null로 둔다.
+10. 출력은 반드시 RequirementAnalysis 스키마를 따른다.
 
-8. check_history와 check_savings는
-   사용자 요청만으로 실행 가능한 경우 missing_fields를 비워둔다.
-
-9. 출력은 반드시 RequirementAnalysis 스키마를 따른다.
-
-10. intent_confidence 에는 분류 확신도를 0.0~1.0 으로 넣는다.
+11. intent_confidence 에는 분류 확신도를 0.0~1.0 으로 넣는다.
 
    - 문장이 명확하고 지원 intent에 정확히 해당하면 0.9 이상
    - 해석 여지가 있으면 0.5~0.8
@@ -128,7 +125,7 @@ source_bank/source_account는 사용자의 보유 계좌 목록을
 
    추측으로 높은 값을 넣지 않는다.
 
-11. entity_confidences 에는 **뽑아낸 엔티티마다** 확신도를 0.0~1.0 으로 넣는다.
+12. entity_confidences 에는 **뽑아낸 엔티티마다** 확신도를 0.0~1.0 으로 넣는다.
    entities 와 같은 필드 이름을 쓴다.
 
    - 발화에 그대로 있고 달리 들릴 여지가 없으면 0.9 이상

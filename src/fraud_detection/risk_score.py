@@ -3,62 +3,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-# ============================================================
-# Validation 기반 Model Score 기준
-#
-# 현재 Isolation Forest Validation 결과를 기준으로 한
-# 초기 서비스 정책값.
-#
-# 추후 재학습 / Validation 결과에 따라 수정 가능.
-# ============================================================
-
-MODEL_SCORE_POINTS = [
-
-    # anomaly_score, model_risk_score
-
-    (
-        0.373701,
-        0.0,
-    ),
-
-    (
-        0.419761,
-        40.0,
-    ),
-
-    (
-        0.446117,
-        70.0,
-    ),
-
-    (
-        0.472755,
-        90.0,
-    ),
-
-    (
-        0.528859,
-        100.0,
-    ),
-]
+try:
+    from .config import (
+        MODEL_SCORE_POINTS,
+        MODEL_WEIGHT,
+        RISK_LEVEL_THRESHOLDS,
+        RULE_WEIGHT,
+    )
+except ImportError:
+    from fraud_detection.config import (
+        MODEL_SCORE_POINTS,
+        MODEL_WEIGHT,
+        RISK_LEVEL_THRESHOLDS,
+        RULE_WEIGHT,
+    )
 
 
-# ============================================================
-# Final Risk Weight
-# ============================================================
-
-MODEL_WEIGHT = 0.40
-
-RULE_WEIGHT = 0.60
-
-
-# ============================================================
-# Risk Level Threshold
-# ============================================================
-
-MEDIUM_THRESHOLD = 40.0
-
-HIGH_THRESHOLD = 70.0
+# 기존 외부 참조와 테스트의 호환성을 유지한다.
+MEDIUM_THRESHOLD = RISK_LEVEL_THRESHOLDS["MEDIUM"]
+HIGH_THRESHOLD = RISK_LEVEL_THRESHOLDS["HIGH"]
 
 
 # ============================================================

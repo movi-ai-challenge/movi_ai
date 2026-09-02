@@ -1,34 +1,52 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+MAX_TRANSCRIPT_LENGTH = 2_000
+FollowUpField = Literal[
+    "recipient_name",
+    "recipient_bank",
+    "recipient_account",
+    "amount",
+]
+
+
+class TranscriptRequest(BaseModel):
+    """STT 최종 문장을 받는 요청의 공통 검증 규칙."""
+
+    transcript: str = Field(
+        min_length=1,
+        max_length=MAX_TRANSCRIPT_LENGTH,
+        description="Google STT 최종 인식 결과",
+    )
+
+    @field_validator("transcript")
+    @classmethod
+    def validate_transcript(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("transcript는 공백일 수 없습니다.")
+        return stripped
 
 
 # ============================================================
 # 최초 Voice 분석 Request
 # ============================================================
 
-class VoiceAnalyzeRequest(BaseModel):
-
-    transcript: str = Field(
-        min_length=1,
-        description="Google STT 최종 인식 결과",
-    )
+class VoiceAnalyzeRequest(TranscriptRequest):
+    """최초 음성 명령 분석 요청."""
 
 
 # ============================================================
 # Follow-up Request
 # ============================================================
 
-class VoiceFollowUpRequest(BaseModel):
+class VoiceFollowUpRequest(TranscriptRequest):
 
-    transcript: str = Field(
-        min_length=1,
-        description="추가 정보에 대한 사용자 음성 인식 결과",
-    )
-
-    requested_field: str = Field(
+    requested_field: FollowUpField = Field(
         description=(
             "Backend에서 추가로 요청한 Entity 이름"
         ),
@@ -57,3 +75,13 @@ class VoiceAnalyzeResponse(BaseModel):
     )
 
     message: Optional[str] = None
+
+
+class VoiceFollowUpResponse(BaseModel):
+    status: Literal["analyzed", "parse_failed"]
+
+    transcript: str
+
+    entities: dict[str, Any] = Field(
+        default_factory=dict
+    )

@@ -20,7 +20,7 @@ try:
         CARD_CONFIG,
     )
 except ImportError:
-    from config import (
+    from fraud_detection.config import (
         CSV_ENCODING,
         ELECTRONIC_CONFIG,
         CARD_CONFIG,

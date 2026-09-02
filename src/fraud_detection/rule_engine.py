@@ -6,6 +6,12 @@ from typing import Any
 import math
 
 
+try:
+    from .config import RULE_CONFIG
+except ImportError:
+    from fraud_detection.config import RULE_CONFIG
+
+
 # ============================================================
 # Rule Result
 # ============================================================
@@ -20,54 +26,6 @@ class RuleResult:
     score: float
 
     reason: str
-
-
-# ============================================================
-# Rule Config
-# ============================================================
-
-RULE_CONFIG = {
-
-    # 평소 거래 대비 5배 이상
-    "HIGH_AMOUNT_RATIO": {
-        "threshold": 5.0,
-        "score": 25.0,
-    },
-
-    # 과거 평균 대비 5 표준편차 이상
-    "EXTREME_AMOUNT_ZSCORE": {
-        "threshold": 5.0,
-        "score": 20.0,
-    },
-
-    "NIGHT_TRANSACTION": {
-        "score": 15.0,
-    },
-
-    "NEW_RECIPIENT": {
-        "score": 15.0,
-    },
-
-    "UNUSUAL_MEDIUM": {
-        "score": 15.0,
-    },
-
-    "CROSS_BANK": {
-        "score": 5.0,
-    },
-
-    # 당일 이미 3건 이상 존재
-    "REPEATED_SAME_DAY": {
-        "threshold": 3,
-        "score": 10.0,
-    },
-
-    # 동일 시간 Bucket에서 이미 2건 이상
-    "REPEATED_TIME_BUCKET": {
-        "threshold": 2,
-        "score": 10.0,
-    },
-}
 
 
 # ============================================================

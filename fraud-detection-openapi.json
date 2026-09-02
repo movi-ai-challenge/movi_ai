@@ -1,0 +1,312 @@
+{
+    "openapi": "3.1.0",
+    "info": {
+        "title": "MOVI Fraud Detection API",
+        "description": "Isolation Forest + Rule Engine 기반 MOVI 이상거래 탐지 API",
+        "version": "0.4.0"
+    },
+    "paths": {
+        "/": {
+            "get": {
+                "summary": "Root",
+                "operationId": "root__get",
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/health": {
+            "get": {
+                "summary": "Health Check",
+                "operationId": "health_check_health_get",
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/fraud/detect": {
+            "post": {
+                "summary": "Detect Fraud",
+                "operationId": "detect_fraud_api_v1_fraud_detect_post",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/FraudDetectionRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/FraudDetectionResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "FraudDetectionRequest": {
+                "properties": {
+                    "current_transaction": {
+                        "$ref": "#/components/schemas/TransactionData"
+                    },
+                    "history": {
+                        "items": {
+                            "$ref": "#/components/schemas/TransactionData"
+                        },
+                        "type": "array",
+                        "title": "History"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "current_transaction"
+                ],
+                "title": "FraudDetectionRequest",
+                "description": "Spring → Python FDS 요청.\n\ncurrent_transaction:\n    현재 탐지할 거래\n\nhistory:\n    현재 거래보다 이전에 발생한\n    동일 출금 계좌의 과거 거래 목록"
+            },
+            "FraudDetectionResponse": {
+                "properties": {
+                    "transaction_id": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Transaction Id"
+                    },
+                    "anomaly_score": {
+                        "type": "number",
+                        "title": "Anomaly Score"
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "title": "Threshold"
+                    },
+                    "is_anomaly": {
+                        "type": "boolean",
+                        "title": "Is Anomaly"
+                    },
+                    "model": {
+                        "type": "string",
+                        "title": "Model",
+                        "default": "isolation_forest"
+                    },
+                    "rule_score": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Rule Score"
+                    },
+                    "final_risk_score": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Final Risk Score"
+                    },
+                    "risk_level": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Risk Level"
+                    },
+                    "triggered_rules": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array",
+                        "title": "Triggered Rules"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "anomaly_score",
+                    "threshold",
+                    "is_anomaly"
+                ],
+                "title": "FraudDetectionResponse",
+                "description": "Python FDS → Spring 응답.\n\n현재 단계에서는 Isolation Forest 결과 중심.\n\nRule Engine과 Final Risk Score가 구현되면\n이후 필드를 확장한다."
+            },
+            "HTTPValidationError": {
+                "properties": {
+                    "detail": {
+                        "items": {
+                            "$ref": "#/components/schemas/ValidationError"
+                        },
+                        "type": "array",
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "title": "HTTPValidationError"
+            },
+            "TransactionData": {
+                "properties": {
+                    "transaction_id": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Transaction Id"
+                    },
+                    "sender_account": {
+                        "type": "string",
+                        "title": "Sender Account"
+                    },
+                    "receiver_account": {
+                        "type": "string",
+                        "title": "Receiver Account"
+                    },
+                    "sender_bank": {
+                        "type": "string",
+                        "title": "Sender Bank"
+                    },
+                    "receiver_bank": {
+                        "type": "string",
+                        "title": "Receiver Bank"
+                    },
+                    "transaction_type": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Transaction Type"
+                    },
+                    "amount": {
+                        "type": "number",
+                        "exclusiveMinimum": 0.0,
+                        "title": "Amount",
+                        "description": "거래 금액"
+                    },
+                    "transaction_datetime": {
+                        "type": "string",
+                        "format": "date-time",
+                        "title": "Transaction Datetime"
+                    },
+                    "medium": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Medium"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "sender_account",
+                    "receiver_account",
+                    "sender_bank",
+                    "receiver_bank",
+                    "amount",
+                    "transaction_datetime"
+                ],
+                "title": "TransactionData",
+                "description": "FDS에서 사용하는 단일 거래 데이터.\n\nSpring Backend에서 전달하는 API DTO와\nPython 내부 Feature Engineering 사이의\n공통 입력 구조로 사용한다."
+            },
+            "ValidationError": {
+                "properties": {
+                    "loc": {
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "integer"
+                                }
+                            ]
+                        },
+                        "type": "array",
+                        "title": "Location"
+                    },
+                    "msg": {
+                        "type": "string",
+                        "title": "Message"
+                    },
+                    "type": {
+                        "type": "string",
+                        "title": "Error Type"
+                    },
+                    "input": {
+                        "title": "Input"
+                    },
+                    "ctx": {
+                        "type": "object",
+                        "title": "Context"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "loc",
+                    "msg",
+                    "type"
+                ],
+                "title": "ValidationError"
+            }
+        }
+    }
+}

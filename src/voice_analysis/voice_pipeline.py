@@ -19,7 +19,11 @@ from .backend_client import (
 
 class VoicePipeline:
     """
-    MOVI 음성 요구사항 분석 Pipeline.
+    MOVI 음성→Backend 통합 실험용 Pipeline.
+
+    공식 서버 경로는 api.py → VoiceAnalysisService이며, Spring Backend가
+    request_id와 대화 상태를 관리한다. 이 클래스는 기존 통합 테스트와
+    로컬 실험의 호환성을 위해 유지한다.
 
     Python 담당
     -----------

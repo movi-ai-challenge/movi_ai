@@ -1,3 +1,9 @@
+"""Legacy FDS 결과 push client.
+
+현재 공식 계약은 Spring이 FDS API를 호출하고 HTTP 응답으로 결과를 받는
+동기 구조다. 이 모듈은 기존 연결 실험의 호환성을 위해 유지한다.
+"""
+
 from __future__ import annotations
 
 import os

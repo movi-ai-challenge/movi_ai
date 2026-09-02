@@ -1,411 +1,254 @@
+"""MOVI FDS의 공식 추론 서비스.
+
+FastAPI와 분리된 하나의 서비스에서 다음 흐름을 수행한다.
+
+    Spring DTO → AIHub Mapping → Feature Engineering
+    → Isolation Forest → Rule Engine → Final Risk Score
+"""
+
 from __future__ import annotations
 
+import json
+import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import joblib
+import numpy as np
+from scipy import sparse
 
+from .config import ELECTRONIC_CONFIG
+from .feature_engineering import engineer_electronic_features
+from .risk_score import calculate_risk_score
+from .rule_engine import FraudRuleEngine
 from .schemas import FraudDetectionRequest
-
 from .transaction_mapper import (
-    request_to_dataframe,
     find_current_transaction_index,
-)
-
-from .feature_engineering import (
-    transform_features,
+    request_to_dataframe,
 )
 
 
-# ============================================================
-# Config
-# ============================================================
-
-DEFAULT_MODEL_PATH = (
-    "models/electronic/isolation_forest.joblib"
-)
-
-DEFAULT_THRESHOLD = 0.44611697
+logger = logging.getLogger(__name__)
+FeatureEngineer = Callable[[Any], Any]
 
 
-# ============================================================
-# Exception
-# ============================================================
-
-class FraudDetectionServiceError(
-    RuntimeError
-):
-    """
-    FDS Service에서 발생하는 오류.
-    """
-
-    pass
+class InvalidTransactionRequest(ValueError):
+    """클라이언트가 수정해야 하는 거래 요청 오류."""
 
 
-# ============================================================
-# Fraud Detection Service
-# ============================================================
+class FraudDetectionServiceError(RuntimeError):
+    """외부에 상세 내용을 노출하지 않아야 하는 FDS 내부 오류."""
+
 
 class FraudDetectionService:
-    """
-    MOVI 이상거래 탐지 Service.
-
-    역할
-    ----
-    1. 저장된 Model Bundle Load
-    2. Spring 거래 Request 변환
-    3. Historical Feature Engineering
-    4. 기존 Preprocessor Transform
-    5. Isolation Forest 추론
-    6. anomaly_score 반환
-
-    주의
-    ----
-    추론에서는 Preprocessor를 절대 다시 fit하지 않는다.
-    """
+    """모델·규칙·위험점수를 결합한 단일 FDS 서비스."""
 
     def __init__(
         self,
         model_path: str | Path | None = None,
+        threshold_path: str | Path | None = None,
         threshold: float | None = None,
-    ):
-
-        # ====================================================
-        # Model Path
-        # ====================================================
-
-        if model_path is None:
-
-            model_path = os.getenv(
-                "FDS_MODEL_PATH",
-                DEFAULT_MODEL_PATH,
-            )
+        feature_engineer: FeatureEngineer = engineer_electronic_features,
+        rule_engine: FraudRuleEngine | None = None,
+        *,
+        autoload: bool = True,
+    ) -> None:
+        default_model_path = ELECTRONIC_CONFIG["model_path"]
+        default_threshold_path = ELECTRONIC_CONFIG["threshold_path"]
 
         self.model_path = Path(
             model_path
+            or os.getenv("FDS_MODEL_PATH", str(default_model_path))
         )
-
-
-        # ====================================================
-        # Threshold
-        # ====================================================
-
-        if threshold is None:
-
-            threshold = float(
-                os.getenv(
-                    "FDS_THRESHOLD",
-                    str(DEFAULT_THRESHOLD),
-                )
-            )
-
-        self.threshold = threshold
-
-
-        # ====================================================
-        # Model Bundle Load
-        # ====================================================
-
-        self.bundle = (
-            self._load_model_bundle()
+        self.threshold_path = Path(
+            threshold_path
+            or os.getenv("FDS_THRESHOLD_PATH", str(default_threshold_path))
         )
+        self.threshold_override = threshold
+        self.feature_engineer = feature_engineer
+        self.rule_engine = rule_engine or FraudRuleEngine()
 
+        self.bundle: dict[str, Any] | None = None
+        self.model: Any = None
+        self.preprocessor: Any = None
+        self.threshold: float | None = None
+        self.dataset_type = "electronic"
+        self.model_load_error: str | None = None
 
-        self.model = (
-            self.bundle["model"]
-        )
+        if autoload:
+            self.load_resources()
 
-        self.preprocessor = (
-            self.bundle["preprocessor"]
-        )
+    def load_resources(self) -> None:
+        """모델, 전처리기, Threshold를 로드한다.
 
+        실패를 상태로 보관하여 API 서버의 /health는 계속 응답할 수 있게 한다.
+        """
 
-        self.dataset_type = (
-            self.bundle.get(
-                "dataset_type",
-                "electronic",
-            )
-        )
-
-
-    # ============================================================
-    # Model Bundle Load
-    # ============================================================
-
-    def _load_model_bundle(
-        self,
-    ) -> dict[str, Any]:
-
-        if not self.model_path.exists():
-
-            raise FraudDetectionServiceError(
-                "Isolation Forest 모델 파일을 "
-                f"찾을 수 없습니다: "
-                f"{self.model_path}"
-            )
-
+        self.bundle = None
+        self.model = None
+        self.preprocessor = None
+        self.threshold = None
+        self.model_load_error = None
 
         try:
+            if not self.model_path.exists():
+                raise FileNotFoundError("학습된 모델 파일이 없습니다.")
 
-            bundle = joblib.load(
-                self.model_path
-            )
+            loaded_bundle = joblib.load(self.model_path)
+            if not isinstance(loaded_bundle, dict):
+                raise ValueError("모델 Bundle 형식이 올바르지 않습니다.")
+
+            loaded_model = loaded_bundle.get("model")
+            loaded_preprocessor = loaded_bundle.get("preprocessor")
+            if loaded_model is None or loaded_preprocessor is None:
+                raise ValueError("모델 Bundle에 필수 구성요소가 없습니다.")
+
+            loaded_threshold = self.threshold_override
+            if loaded_threshold is None:
+                if not self.threshold_path.exists():
+                    raise FileNotFoundError("Threshold 파일이 없습니다.")
+                with self.threshold_path.open("r", encoding="utf-8") as file:
+                    threshold_config = json.load(file)
+                loaded_threshold = float(threshold_config["threshold"])
+
+            loaded_threshold = float(loaded_threshold)
+            if not np.isfinite(loaded_threshold):
+                raise ValueError("Threshold는 유한한 숫자여야 합니다.")
+
+            self.bundle = loaded_bundle
+            self.model = loaded_model
+            self.preprocessor = loaded_preprocessor
+            self.threshold = loaded_threshold
+            self.dataset_type = loaded_bundle.get("dataset_type", "electronic")
+            logger.info("FDS model resources loaded successfully")
 
         except Exception as error:
+            self.model_load_error = type(error).__name__
+            logger.exception("Failed to load FDS model resources")
 
-            raise FraudDetectionServiceError(
-                "Isolation Forest Model Bundle "
-                f"로드 실패: {error}"
-            ) from error
+    def ready(self) -> bool:
+        """전체 추론에 필요한 리소스가 준비됐는지 반환한다."""
 
+        return (
+            self.model is not None
+            and self.preprocessor is not None
+            and self.threshold is not None
+            and self.model_load_error is None
+        )
 
-        if not isinstance(
-            bundle,
-            dict,
-        ):
+    @staticmethod
+    def validate_unique_transaction_ids(
+        request: FraudDetectionRequest,
+    ) -> None:
+        """현재 거래와 History 전체에서 거래 ID 중복을 차단한다."""
 
-            raise FraudDetectionServiceError(
-                "Model Bundle이 dict 형식이 아닙니다."
-            )
-
-
-        required_keys = [
-            "model",
-            "preprocessor",
+        transactions = [
+            request.current_transaction,
+            *(request.history or []),
+        ]
+        transaction_ids = [
+            str(transaction.transaction_id).strip()
+            for transaction in transactions
         ]
 
-
-        missing_keys = [
-
-            key
-
-            for key in required_keys
-
-            if key not in bundle
-
-        ]
-
-
-        if missing_keys:
-
-            raise FraudDetectionServiceError(
-                "Model Bundle 필수 값이 없습니다: "
-                f"{missing_keys}"
+        if len(transaction_ids) != len(set(transaction_ids)):
+            raise InvalidTransactionRequest(
+                "transaction_id는 current_transaction과 history에서 "
+                "중복될 수 없습니다."
             )
-
-
-        return bundle
-
-
-    # ============================================================
-    # Fraud Detection
-    # ============================================================
 
     def detect(
         self,
         request: FraudDetectionRequest,
     ) -> dict[str, Any]:
-        """
-        거래 한 건에 대해 이상거래 탐지를 수행한다.
+        """현재 거래 한 건의 모델·규칙·최종 위험 결과를 반환한다."""
 
-        Spring에서:
-            current_transaction
-            history
-
-        를 전달하면 현재 거래의 이상도를 반환한다.
-        """
-
-        # ====================================================
-        # 1. API Request → AIHub DataFrame
-        # ====================================================
-
-        try:
-
-            raw_df = request_to_dataframe(
-                request
+        if not self.ready():
+            raise FraudDetectionServiceError(
+                "이상거래 탐지 모델이 준비되지 않았습니다."
             )
 
-        except Exception as error:
-
-            raise FraudDetectionServiceError(
-                f"거래 데이터 변환 실패: {error}"
-            ) from error
-
-
-        if raw_df.empty:
-
-            raise FraudDetectionServiceError(
-                "거래 데이터가 없습니다."
-            )
-
-
-        # ====================================================
-        # 2. 현재 거래 Index
-        # ====================================================
-
-        current_transaction_id = (
-            request
-            .current_transaction
-            .transaction_id
-        )
-
+        self.validate_unique_transaction_ids(request)
 
         try:
+            dataframe = request_to_dataframe(request)
+            if dataframe.empty:
+                raise InvalidTransactionRequest("거래 데이터가 없습니다.")
 
-            current_index = (
-                find_current_transaction_index(
+            transaction_id = request.current_transaction.transaction_id
+            current_index = find_current_transaction_index(
+                dataframe=dataframe,
+                transaction_id=transaction_id,
+            )
 
-                    dataframe=raw_df,
+            logger.info(
+                "FDS request mapped: total_rows=%d current_index=%d",
+                len(dataframe),
+                current_index,
+            )
 
-                    transaction_id=(
-                        current_transaction_id
-                    ),
+            feature_input = dataframe.drop(
+                columns=["_transaction_id", "_transaction_datetime"],
+                errors="ignore",
+            )
+            engineered = self.feature_engineer(feature_input)
+            if engineered.empty:
+                raise FraudDetectionServiceError(
+                    "Feature Engineering 결과가 비어 있습니다."
                 )
-            )
-
-        except Exception as error:
-
-            raise FraudDetectionServiceError(
-                "현재 거래를 찾지 못했습니다: "
-                f"{error}"
-            ) from error
-
-
-        # ====================================================
-        # 3. Feature Engineering + Transform
-        #
-        # 기존 학습 Preprocessor 사용
-        #
-        # 절대 fit_transform() 하지 않음
-        # ====================================================
-
-        try:
-
-            X = transform_features(
-
-                df=raw_df,
-
-                dataset_type=(
-                    self.dataset_type
-                ),
-
-                preprocessor=(
-                    self.preprocessor
-                ),
-            )
-
-        except Exception as error:
-
-            raise FraudDetectionServiceError(
-                "Feature Transform 실패: "
-                f"{error}"
-            ) from error
-
-
-        # ====================================================
-        # 4. 현재 거래 한 행 선택
-        #
-        # transform_features는 Row 순서를 유지하므로
-        # Raw DataFrame에서 찾은 Index를 그대로 사용한다.
-        # ====================================================
-
-        try:
-
-            current_X = X[
-                current_index:
-                current_index + 1
-            ]
-
-        except Exception as error:
-
-            raise FraudDetectionServiceError(
-                "현재 거래 Feature 추출 실패: "
-                f"{error}"
-            ) from error
-
-
-        # ====================================================
-        # 5. Isolation Forest
-        # ====================================================
-
-        try:
-
-            raw_score = float(
-
-                self.model.score_samples(
-                    current_X
-                )[0]
-
-            )
-
-        except Exception as error:
-
-            raise FraudDetectionServiceError(
-                "Isolation Forest 추론 실패: "
-                f"{error}"
-            ) from error
-
-
-        # ====================================================
-        # 6. Score 방향 변환
-        #
-        # sklearn:
-        #   더 작을수록 이상
-        #
-        # MOVI:
-        #   더 클수록 위험
-        # ====================================================
-
-        anomaly_score = (
-            -raw_score
-        )
-
-
-        # ====================================================
-        # 7. Threshold
-        # ====================================================
-
-        is_anomaly = (
-            anomaly_score
-            >=
-            self.threshold
-        )
-
-
-        # ====================================================
-        # 8. 결과
-        # ====================================================
-
-        return {
-
-            "transaction_id": (
-                current_transaction_id
-            ),
-
-            "raw_score": (
-                raw_score
-            ),
-
-            "anomaly_score": (
-                anomaly_score
-            ),
-
-            "threshold": (
-                self.threshold
-            ),
-
-            "is_anomaly": (
-                is_anomaly
-            ),
-
-            "model": (
-                "isolation_forest"
-            ),
-
-            "history_count": (
-                len(
-                    request.history
+            if current_index >= len(engineered):
+                raise FraudDetectionServiceError(
+                    "현재 거래 Feature 위치가 결과 범위를 벗어났습니다."
                 )
-            ),
-        }
+
+            current_features = engineered.iloc[[current_index]]
+            feature_values = current_features.iloc[0].to_dict()
+
+            rule_result = self.rule_engine.evaluate(feature_values)
+            rule_score = float(rule_result["rule_score"])
+            triggered_rules = list(rule_result["triggered_rules"])
+
+            transformed = self.preprocessor.transform(current_features)
+            transformed = transformed.astype(np.float32)
+            if sparse.issparse(transformed):
+                transformed = transformed.tocsr().astype(np.float32)
+
+            raw_score = float(self.model.score_samples(transformed)[0])
+            anomaly_score = -raw_score
+            is_anomaly = anomaly_score >= self.threshold
+
+            risk_result = calculate_risk_score(
+                anomaly_score=anomaly_score,
+                rule_score=rule_score,
+            )
+
+            logger.info(
+                "FDS inference completed: anomaly=%s rule_risk=%.2f "
+                "final_risk=%.2f risk_level=%s",
+                is_anomaly,
+                rule_score,
+                risk_result.final_risk_score,
+                risk_result.risk_level,
+            )
+
+            return {
+                "transaction_id": transaction_id,
+                "anomaly_score": round(anomaly_score, 6),
+                "threshold": round(self.threshold, 6),
+                "is_anomaly": bool(is_anomaly),
+                "model": "isolation_forest",
+                "rule_score": round(rule_score, 2),
+                "final_risk_score": risk_result.final_risk_score,
+                "risk_level": risk_result.risk_level,
+                "triggered_rules": triggered_rules,
+            }
+
+        except InvalidTransactionRequest:
+            raise
+        except FraudDetectionServiceError:
+            raise
+        except Exception as error:
+            raise FraudDetectionServiceError(
+                "이상거래 추론 과정에서 내부 오류가 발생했습니다."
+            ) from error

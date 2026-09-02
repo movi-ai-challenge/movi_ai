@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""학습 결과 확인과 오프라인 추론을 위한 기존 모듈.
+
+FastAPI 운영 요청에는 사용하지 않는다. 온라인 공식 경로는
+``api.py → FraudDetectionService``이다.
+"""
+
 import json
 from typing import Any
 
@@ -30,7 +36,7 @@ try:
 
 except ImportError:
 
-    from config import (
+    from fraud_detection.config import (
         ELECTRONIC_CONFIG,
         CARD_CONFIG,
     )

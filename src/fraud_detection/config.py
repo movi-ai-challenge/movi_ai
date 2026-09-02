@@ -287,7 +287,107 @@ ISOLATION_FOREST_PARAMS = {
 
 
 # ============================================================
-# 11. 출력 디렉토리 생성
+# 11. Rule Engine 정책
+#
+# Rule 임계값과 가중치를 한 곳에서 관리한다.
+# 운영 정책 변경 시 rule_engine.py를 수정하지 않는다.
+# ============================================================
+
+RULE_CONFIG = {
+
+    "HIGH_AMOUNT_RATIO": {
+        "threshold": 5.0,
+        "score": 25.0,
+    },
+
+    "EXTREME_AMOUNT_ZSCORE": {
+        "threshold": 5.0,
+        "score": 20.0,
+    },
+
+    "NIGHT_TRANSACTION": {
+        "score": 15.0,
+    },
+
+    "NEW_RECIPIENT": {
+        "score": 15.0,
+    },
+
+    "UNUSUAL_MEDIUM": {
+        "score": 15.0,
+    },
+
+    "CROSS_BANK": {
+        "score": 5.0,
+    },
+
+    "REPEATED_SAME_DAY": {
+        "threshold": 3,
+        "score": 10.0,
+    },
+
+    "REPEATED_TIME_BUCKET": {
+        "threshold": 2,
+        "score": 10.0,
+    },
+}
+
+
+# ============================================================
+# 12. Final Risk Score 정책
+#
+# Validation 분포 기반 Model Score 기준점과
+# Model / Rule 결합 비율, 등급 기준을 중앙 관리한다.
+# ============================================================
+
+MODEL_SCORE_POINTS = [
+    (0.373701, 0.0),
+    (0.419761, 40.0),
+    (0.446117, 70.0),
+    (0.472755, 90.0),
+    (0.528859, 100.0),
+]
+
+MODEL_WEIGHT = 0.40
+RULE_WEIGHT = 0.60
+
+RISK_LEVEL_THRESHOLDS = {
+    "MEDIUM": 40.0,
+    "HIGH": 70.0,
+}
+
+
+def validate_risk_policy():
+    """잘못된 위험 정책 설정으로 서버가 실행되는 것을 방지한다."""
+
+    if abs((MODEL_WEIGHT + RULE_WEIGHT) - 1.0) > 1e-9:
+        raise ValueError(
+            "MODEL_WEIGHT와 RULE_WEIGHT의 합은 1.0이어야 합니다."
+        )
+
+    medium_threshold = RISK_LEVEL_THRESHOLDS["MEDIUM"]
+    high_threshold = RISK_LEVEL_THRESHOLDS["HIGH"]
+
+    if not 0.0 <= medium_threshold < high_threshold <= 100.0:
+        raise ValueError(
+            "위험 등급 기준은 0 <= MEDIUM < HIGH <= 100이어야 합니다."
+        )
+
+    model_x_values = [point[0] for point in MODEL_SCORE_POINTS]
+    model_y_values = [point[1] for point in MODEL_SCORE_POINTS]
+
+    if model_x_values != sorted(model_x_values):
+        raise ValueError("MODEL_SCORE_POINTS의 anomaly_score는 오름차순이어야 합니다.")
+
+    if model_y_values != sorted(model_y_values):
+        raise ValueError("MODEL_SCORE_POINTS의 위험 점수는 오름차순이어야 합니다.")
+
+
+validate_risk_policy()
+
+
+# ============================================================
+# 13. 출력 디렉토리 생성
 # ============================================================
 
 def create_output_directories():
