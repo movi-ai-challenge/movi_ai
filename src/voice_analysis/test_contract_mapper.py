@@ -1,6 +1,7 @@
 from .contract_mapper import (
     detect_missing_slots,
     map_entities,
+    map_entity_confidences,
     map_intent,
 )
 
@@ -195,3 +196,142 @@ def test_non_transfer_intents_have_no_required_slots():
             intent=intent,
             entities=empty,
         ) == []
+
+
+# ============================================================
+# 엔티티 신뢰도 매핑
+#
+# 백엔드는 신뢰도가 없거나 0.80 미만인 엔티티를 버리고 되묻는다.
+# 전부 null 로 내려보내면 사용자가 정확히 말해도 재질문만 반복된다.
+# ============================================================
+
+def _confidences(internal_entities, internal_confidences):
+    entities = map_entities(internal_entities)
+    return entities, map_entity_confidences(
+        internal_entities,
+        internal_confidences,
+        entities,
+    )
+
+
+def test_뽑은_엔티티의_신뢰도를_그대로_싣는다():
+
+    entities, confidences = _confidences(
+        {"amount": 10000, "recipient_name": "엄마"},
+        {"amount": 0.98, "recipient_name": 0.95},
+    )
+
+    assert entities.amount == 10000
+    assert entities.recipient == "엄마"
+    assert confidences.amount == 0.98
+    assert confidences.recipient == 0.95
+
+
+def test_낮은_신뢰도를_올리지_않는다():
+    """백엔드가 되묻게 하는 것이 정상 동작이다."""
+
+    _, confidences = _confidences(
+        {"amount": 20000, "recipient_name": "어머님"},
+        {"amount": 0.42, "recipient_name": 0.51},
+    )
+
+    assert confidences.amount == 0.42
+    assert confidences.recipient == 0.51
+
+
+def test_뽑지_못한_엔티티에는_신뢰도를_넣지_않는다():
+
+    entities, confidences = _confidences(
+        {"recipient_name": "엄마"},
+        {"recipient_name": 0.95},
+    )
+
+    assert entities.amount is None
+    assert confidences.amount is None
+    assert confidences.recipient == 0.95
+
+
+def test_값이_정리_과정에서_떨어지면_신뢰도도_함께_버린다():
+    """
+    형식이 틀린 날짜는 map_entities 가 버린다. 신뢰도만 남으면 백엔드는
+    없는 정보를 있다고 읽는다.
+    """
+
+    entities, confidences = _confidences(
+        {"date_from": "2026/08/01", "amount": -100},
+        {"date_from": 0.9, "amount": 0.9},
+    )
+
+    assert entities.startDate is None
+    assert entities.amount is None
+    assert confidences.startDate is None
+    assert confidences.amount is None
+
+
+def test_범위를_벗어난_신뢰도는_버린다():
+
+    _, confidences = _confidences(
+        {"amount": 10000, "recipient_name": "엄마"},
+        {"amount": 1.7, "recipient_name": "높음"},
+    )
+
+    assert confidences.amount is None
+    assert confidences.recipient is None
+
+
+def test_신뢰도가_없으면_null_로_둔다():
+    """값만 있고 신뢰도가 없으면 백엔드가 되묻는다 - 안전한 방향이다."""
+
+    entities, confidences = _confidences(
+        {"amount": 10000, "recipient_name": "엄마"},
+        {},
+    )
+
+    assert entities.amount == 10000
+    assert confidences.amount is None
+
+
+def test_bankName_은_선택된_필드의_신뢰도를_따라간다():
+    """
+    recipient_bank 와 bank 가 모두 있으면 recipient_bank 가 이긴다.
+    신뢰도가 진 쪽을 따라가면 백엔드가 엉뚱한 근거로 판단한다.
+    """
+
+    entities, confidences = _confidences(
+        {"recipient_bank": "국민은행", "bank": "신한은행"},
+        {"recipient_bank": 0.93, "bank": 0.40},
+    )
+
+    assert entities.bankName == "국민은행"
+    assert confidences.bankName == 0.93
+
+
+def test_bankName_이_대체_필드에서_오면_그_신뢰도를_쓴다():
+
+    entities, confidences = _confidences(
+        {"bank": "신한은행"},
+        {"bank": 0.88},
+    )
+
+    assert entities.bankName == "신한은행"
+    assert confidences.bankName == 0.88
+
+
+def test_sourceAccountAlias_도_선택된_필드를_따라간다():
+
+    entities, confidences = _confidences(
+        {"source_bank": "국민은행"},
+        {"source_account": 0.99, "source_bank": 0.61},
+    )
+
+    assert entities.sourceAccountAlias == "국민은행"
+    # source_account 는 비어 있어 선택되지 않았다. 그 신뢰도를 쓰면 안 된다.
+    assert confidences.sourceAccountAlias == 0.61
+
+
+def test_신뢰도_입력이_없어도_깨지지_않는다():
+
+    entities, confidences = _confidences({"amount": 10000}, None)
+
+    assert entities.amount == 10000
+    assert confidences.amount is None

@@ -50,6 +50,34 @@ class RequirementEntities(BaseModel):
     account: Optional[str] = None
 
 
+class RequirementEntityConfidences(BaseModel):
+    """
+    엔티티별 확신도. 필드 이름은 RequirementEntities 와 1:1 로 맞춘다.
+
+    intent_confidence 와 마찬가지로 **모델 자기보고 값이며 보정(calibration)된
+    수치가 아니다.** 그럼에도 내려보내는 이유는, 백엔드가 엔티티마다 신뢰도를 보고
+    낮으면 되묻는 정책을 쓰기 때문이다. 값을 비워 두면 백엔드는 "신뢰할 수 없음"으로
+    읽어 모든 엔티티를 버리고, 사용자가 아무리 정확히 말해도 재질문만 반복된다.
+
+    값을 지어내지 않는 것이 중요하다. 뽑지 못한 엔티티에는 넣지 않는다(null).
+    확신이 낮으면 낮은 값을 그대로 넣어 백엔드가 되묻게 하는 것이 정상 동작이다.
+    """
+
+    recipient_name: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    recipient_bank: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    recipient_account: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    amount: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+    source_bank: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    source_account: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+    date_from: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    date_to: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+    bank: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    account: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+
 # ============================================================
 # Requirement Result
 # ============================================================
@@ -71,6 +99,11 @@ class RequirementAnalysis(BaseModel):
 
     entities: RequirementEntities = Field(
         default_factory=RequirementEntities
+    )
+
+    # 엔티티별 확신도. entities 와 같은 필드 이름을 쓴다.
+    entity_confidences: RequirementEntityConfidences = Field(
+        default_factory=RequirementEntityConfidences
     )
 
     missing_fields: list[str] = Field(
