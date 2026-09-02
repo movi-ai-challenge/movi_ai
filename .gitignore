@@ -38,3 +38,6 @@ Thumbs.db
 
 # Google 서비스 계정 JSON
 secrets/*.json
+
+# 실제 키가 들어가 있던 사고가 있었다. 예시 파일도 추적하지 않는다.
+.env.example
