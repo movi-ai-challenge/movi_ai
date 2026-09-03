@@ -72,7 +72,7 @@ services:
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
       GOOGLE_STT_LOCATION: ${GOOGLE_STT_LOCATION:-us}
-      GOOGLE_STT_MODEL: ${GOOGLE_STT_MODEL:-chirp_3}
+      GOOGLE_STT_MODEL: ${GOOGLE_STT_MODEL:-long}
     volumes:
       # 서비스 계정 JSON 을 secrets/ 에 두면 /app/secrets 로 들어간다.
       # 비어 있어도 컨테이너는 정상 기동한다 (STT/TTS 만 비활성).
