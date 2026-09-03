@@ -5,6 +5,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from .config import SERVICE_VERSION
+
 
 # ============================================================
 # Transaction
@@ -131,3 +133,10 @@ class FraudDetectionResponse(BaseModel):
     triggered_rules: list[str] = Field(
         default_factory=list
     )
+
+    # 이 판정을 낸 서비스 버전.
+    #
+    # 백엔드는 이 값을 감사 기록으로 남긴다. 내려보내지 않으면 백엔드가
+    # 자기 코드에 박아 둔 문자열을 대신 쓰는데, 우리가 버전을 올려도 그쪽은
+    # 모르므로 기록이 실제와 어긋난다.
+    policy_version: str = SERVICE_VERSION
