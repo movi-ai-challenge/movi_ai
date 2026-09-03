@@ -11,6 +11,7 @@ from .fraud_service import (
     FraudDetectionServiceError,
     InvalidTransactionRequest,
 )
+from .config import SERVICE_VERSION
 from .schemas import FraudDetectionRequest, FraudDetectionResponse
 
 
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="MOVI Fraud Detection API",
     description="Isolation Forest + Rule Engine 기반 MOVI 이상거래 탐지 API",
-    version="0.6.0",
+    version=SERVICE_VERSION,
 )
 
 fraud_service = FraudDetectionService()
@@ -46,7 +47,7 @@ def root():
     return {
         "service": "MOVI Fraud Detection API",
         "status": "running",
-        "version": "0.6.0",
+        "version": SERVICE_VERSION,
         "components": [
             "isolation_forest",
             "rule_engine",
