@@ -41,6 +41,9 @@ COPY --from=build /opt/venv /opt/venv
 COPY --chown=movi:movi src/    ./src/
 COPY --chown=movi:movi models/ ./models/
 
+# UVICORN_WORKERS 를 2 로 둔다. 요청 하나가 STT+GPT 로 15~20초 걸리는데
+# 워커가 하나면 그 사이 들어온 WebSocket 업그레이드가 타임아웃된다.
+# 동기 호출은 스레드풀로 넘겨 두었지만, 워커가 늘면 한쪽이 막혀도 다른 쪽이 받는다.
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -48,7 +51,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     TZ=Asia/Seoul \
     APP_MODULE=src.fraud_detection.api:app \
     PORT=8000 \
-    UVICORN_WORKERS=1 \
+    UVICORN_WORKERS=2 \
     ROOT_PATH=
 
 EXPOSE 8000
