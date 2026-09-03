@@ -110,8 +110,13 @@ DEBUG = os.getenv(
 
 OPENAI_MODEL = os.getenv(
     "OPENAI_MODEL",
-    "gpt-5-nano",
+    "gpt-4o-mini",
 )
+
+# 음성 명령은 사용자가 응답을 기다리는 동기 경로다. 모델 호출이 지연될 때
+# SDK의 긴 기본 대기/재시도로 전체 음성 세션이 멈추지 않도록 상한을 둔다.
+OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "5"))
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "0"))
 
 
 def print_config():

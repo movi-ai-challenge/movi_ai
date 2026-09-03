@@ -695,7 +695,9 @@ API와 추론 로직을 분리했기 때문에 FastAPI 없이도 서비스를 �
 
 ```dotenv
 OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-5-nano
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TIMEOUT_SECONDS=5
+OPENAI_MAX_RETRIES=0
 
 GOOGLE_CLOUD_PROJECT=...
 GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/service-account.json

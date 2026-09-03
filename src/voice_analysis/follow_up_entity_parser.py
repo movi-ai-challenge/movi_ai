@@ -1,6 +1,6 @@
 from openai import OpenAI
 
-from .config import OPENAI_MODEL
+from .config import OPENAI_MAX_RETRIES, OPENAI_MODEL, OPENAI_TIMEOUT_SECONDS
 from .schemas import FollowUpEntityResult
 
 
@@ -96,7 +96,10 @@ class FollowUpEntityParser:
     @property
     def client(self) -> OpenAI:
         if self._client is None:
-            self._client = OpenAI()
+            self._client = OpenAI(
+                timeout=OPENAI_TIMEOUT_SECONDS,
+                max_retries=OPENAI_MAX_RETRIES,
+            )
         return self._client
 
     def parse(

@@ -216,6 +216,9 @@ jobs:
                 --env APP_MODULE="$APP_MODULE" \
                 --env PORT="$PORT" \
                 --env ROOT_PATH="$ROOT_PATH" \
+                --env OPENAI_MODEL=gpt-4o-mini \
+                --env OPENAI_TIMEOUT_SECONDS=5 \
+                --env OPENAI_MAX_RETRIES=0 \
                 --volume "${SECRETS_DIRECTORY}:/app/secrets:ro" \
                 "$IMAGE_REFERENCE"; then
                 restore "$NAME" "$BACKUP"
