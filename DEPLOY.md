@@ -103,7 +103,9 @@ FDS_MODEL_PATH=models/electronic/isolation_forest.joblib
 FDS_THRESHOLD=0.44611697
 
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-5-nano
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TIMEOUT_SECONDS=5
+OPENAI_MAX_RETRIES=0
 
 VOICE_DEBUG=false
 
