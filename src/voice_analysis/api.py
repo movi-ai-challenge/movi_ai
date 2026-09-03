@@ -429,7 +429,7 @@ def analyze_follow_up(
         500: {"model": ContractErrorResponse},
     },
 )
-async def analyze_voice_internal(
+def analyze_voice_internal(
     audio: UploadFile = File(
         description="WebM/Opus 또는 WAV. 최대 5MB",
     ),
@@ -438,6 +438,15 @@ async def analyze_voice_internal(
     expectedIntent: Optional[str] = Form(default=None),
     expectedSlots: Optional[str] = Form(default=None),
 ):
+    """
+    이 함수는 일부러 ``def`` 다(``async def`` 가 아니다).
+
+    STT 와 GPT 호출이 둘 다 동기이고 합쳐서 15~20초가 걸린다. ``async def`` 로 두면
+    그동안 이벤트 루프가 통째로 멈춰 **다른 요청을 하나도 받지 못한다** — 실제로
+    이것 때문에 같은 시간에 들어온 WebSocket 업그레이드가 타임아웃돼 음성 명령이
+    실패했다(2026-09-03). ``def`` 로 두면 FastAPI 가 스레드풀에서 돌려 루프가 풀린다.
+    """
+
     started = time.perf_counter()
 
     # --------------------------------------------------------
@@ -445,7 +454,7 @@ async def analyze_voice_internal(
     # --------------------------------------------------------
 
     try:
-        audio_bytes = await audio.read()
+        audio_bytes = audio.file.read()
 
         stt_result = _get_stt_service().transcribe(audio_bytes)
 
@@ -832,7 +841,10 @@ async def stream_voice_internal(
             # 분석 실패로 연결을 끊지 않는다. 인식된 문장은 이미 화면에 떠 있고,
             # 사용자에게는 그 뒤가 조용해지는 것보다 오류를 듣는 편이 낫다.
             try:
-                analysis = analyze_command_text(
+                # 스레드로 넘긴다. GPT 호출은 동기라 여기서 그냥 부르면 이벤트 루프가
+                # 15초 넘게 멈추고, 그 사이 다른 사용자의 연결이 전부 타임아웃된다.
+                analysis = await asyncio.to_thread(
+                    analyze_command_text,
                     request_id=f"voice-stream-{voiceSessionId}",
                     voice_session_id=voiceSessionId,
                     transcript=command,
