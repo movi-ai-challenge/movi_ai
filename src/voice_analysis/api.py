@@ -803,16 +803,20 @@ async def stream_voice_internal(
 
     audio_stream = AudioStream()
     session = StreamSession()
+    received_final = False
+    client_disconnected = False
 
     async def pump_audio() -> None:
         """
         WebSocket 수신을 큐로 옮긴다. 인식과 수신을 한 루프에 두면 Google 응답을
         기다리는 동안 오디오를 못 받아 조각이 밀린다.
         """
+        nonlocal client_disconnected
         try:
             while True:
                 message = await websocket.receive()
                 if message.get("type") == "websocket.disconnect":
+                    client_disconnected = True
                     break
                 chunk = message.get("bytes")
                 if chunk:
@@ -821,7 +825,7 @@ async def stream_voice_internal(
                 if message.get("text") == "EOS":
                     break
         except WebSocketDisconnect:
-            pass
+            client_disconnected = True
         finally:
             await audio_stream.close()
 
@@ -831,6 +835,9 @@ async def stream_voice_internal(
         async for result in _get_stt_stream_service().recognize(audio_stream):
             message = session.consume(result)
             await websocket.send_json(message)
+
+            if message["type"] == "final":
+                received_final = True
 
             if message["type"] != "final" or not message["activated"]:
                 continue
@@ -863,6 +870,17 @@ async def stream_voice_internal(
                     "message": f"{type(error).__name__}: {error}",
                     "retryable": True,
                 })
+
+        # EOS까지 정상 수신했지만 Google STT가 interim만 반환한 경우다. 중간
+        # 인식으로 금융 명령을 실행하지 않고, 연결을 닫기 전에 재시도 이유를
+        # 명시적으로 알려 프론트가 일반 연결 장애와 구분하게 한다.
+        if not received_final and not client_disconnected:
+            await websocket.send_json({
+                "type": "error",
+                "code": "NO_FINAL_RESULT",
+                "message": "음성을 최종 문장으로 확정하지 못했습니다.",
+                "retryable": True,
+            })
 
     except WebSocketDisconnect:
         pass

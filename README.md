@@ -373,6 +373,9 @@ analysis → Intent/Entity 분석 결과
 error    → 오류 코드와 재시도 가능 여부
 ```
 
+`EOS`까지 정상 수신했지만 STT가 `final`을 만들지 못하면 중간 인식으로 금융 명령을
+실행하지 않고 `NO_FINAL_RESULT` 오류를 반환한다. 이 오류는 재시도할 수 있다.
+
 ---
 
 ## 10. Voice 오류 처리

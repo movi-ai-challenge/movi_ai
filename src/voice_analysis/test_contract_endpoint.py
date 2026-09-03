@@ -244,3 +244,30 @@ def test_error_body_echoes_request_id():
     )
 
     assert response.json()["detail"]["requestId"] == "voice-123"
+
+
+def test_stream_without_final_returns_retryable_error():
+    class FakeStreamService:
+        async def recognize(self, audio_stream):
+            async for _ in audio_stream:
+                pass
+            if False:
+                yield None
+
+    with patch.object(
+        api_module,
+        "_get_stt_stream_service",
+        lambda: FakeStreamService(),
+    ):
+        with client.websocket_connect(
+            "/internal/v1/voice/stream?voiceSessionId=15"
+        ) as websocket:
+            websocket.send_text("EOS")
+            message = websocket.receive_json()
+
+    assert message == {
+        "type": "error",
+        "code": "NO_FINAL_RESULT",
+        "message": "음성을 최종 문장으로 확정하지 못했습니다.",
+        "retryable": True,
+    }
