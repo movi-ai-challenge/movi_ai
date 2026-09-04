@@ -81,8 +81,13 @@ class StreamSession:
     붙었다 지워졌다 하므로, 확정된 문장과 진행 중인 문장을 나눠서 넘긴다.
     """
 
-    def __init__(self, detector: WakeWordDetector | None = None) -> None:
-        self.state = StreamState()
+    def __init__(
+        self,
+        detector: WakeWordDetector | None = None,
+        *,
+        activated: bool = False,
+    ) -> None:
+        self.state = StreamState(activated=activated)
         self._detector = detector or WakeWordDetector()
 
     def consume(self, result: dict) -> dict:
@@ -111,6 +116,9 @@ class StreamSession:
         if wake.activated:
             self.state.activated = True
             self.state.command = wake.command
+        elif self.state.activated:
+            # 백엔드가 검증한 재질문 문맥에서는 호출어 없이 짧은 답을 받는다.
+            self.state.command = full_text
 
         return {
             "type": result.get("type"),

@@ -99,3 +99,12 @@ def test_비슷하지_않은_말은_호출어로_보지_않는다():
     result = session.consume(final("오늘 모임 있어"))
 
     assert result["activated"] is False
+
+
+def test_재질문_문맥에서는_호출어_없이_답을_받는다():
+    session = StreamSession(activated=True)
+
+    result = session.consume(final("오만 원"))
+
+    assert result["activated"] is True
+    assert result["command"] == "오만 원"
