@@ -677,6 +677,18 @@ def _analyze_follow_up(
     백엔드 세션이 진행 중이던 이체를 잃는다.
     """
 
+    # 취소·작업 전환·정정은 요청받은 슬롯 추출보다 먼저 본다. 그렇지 않으면
+    # "취소해줘"가 금액 파싱 실패인 TRANSFER로 남아 사용자가 대화에 갇힌다.
+    full_analysis = voice_service.analyze_command(transcript)
+    full_intent = map_intent(full_analysis.intent)
+    if full_intent in {"CANCEL", "BALANCE", "HISTORY", "TRANSFER"}:
+        return (
+            full_intent,
+            float(full_analysis.intent_confidence),
+            full_analysis.entities.model_dump(),
+            full_analysis.entity_confidences.model_dump(),
+        )
+
     parsed = voice_service.parse_follow_up(
         field_name=field_name,
         text=transcript,
@@ -802,7 +814,9 @@ async def stream_voice_internal(
     await websocket.accept()
 
     audio_stream = AudioStream()
-    session = StreamSession()
+    session = StreamSession(
+        activated=_resolve_follow_up_field(expectedSlots) is not None,
+    )
     received_final = False
     client_disconnected = False
 

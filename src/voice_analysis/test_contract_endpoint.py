@@ -173,6 +173,7 @@ def test_follow_up_keeps_expected_intent():
     ):
         body = _post(
             transcript="오만 원",
+            analysis=_analysis("unknown"),
             data={
                 "expectedIntent": "TRANSFER",
                 "expectedSlots": '["AMOUNT"]',
@@ -185,6 +186,33 @@ def test_follow_up_keeps_expected_intent():
     # AI 는 이전 수취인을 다시 채우지 않는다 (계약 2.5)
     assert body["entities"]["recipient"] is None
     assert body["detectedMissingEntities"] == ["RECIPIENT"]
+
+
+def test_follow_up_cancel_is_handled_before_slot_extraction():
+    body = _post(
+        transcript="취소해줘",
+        analysis=_analysis("cancel"),
+        data={
+            "expectedIntent": "TRANSFER",
+            "expectedSlots": '["AMOUNT"]',
+        },
+    ).json()
+
+    assert body["intent"] == "CANCEL"
+    assert body["entities"]["amount"] is None
+
+
+def test_follow_up_can_switch_to_balance():
+    body = _post(
+        transcript="잔액부터 알려줘",
+        analysis=_analysis("check_balance"),
+        data={
+            "expectedIntent": "TRANSFER",
+            "expectedSlots": '["AMOUNT"]',
+        },
+    ).json()
+
+    assert body["intent"] == "BALANCE"
 
 
 def test_malformed_expected_slots_falls_back_to_full_analysis():
